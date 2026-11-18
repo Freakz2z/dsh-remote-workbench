@@ -3,6 +3,7 @@ import {
   buildResourceSample,
   ResourceMonitor,
   parseResourceSections,
+  windowsProbeCommand,
 } from "../src/host/resources.ts";
 
 const linux = (next = false) => ({
@@ -96,6 +97,88 @@ describe("real resource output parsing", () => {
     );
     expect(changed.cpu.usagePercent).toBeNull();
     expect(changed.disks[0].readBytesPerSecond).toBeNull();
+  });
+  it("parses Windows counters without treating a missing GPU as zero", () => {
+    const first = buildResourceSample("host", {
+      sections: {
+        PLATFORM: "Windows",
+        HOSTNAME: "win-fixture",
+        KERNEL: "10.0.22631",
+        OS: "Microsoft Windows 11 专业工作站版",
+        UPTIME: "3600",
+        WINCPU: "_Total|2|1|1\n0|4|3|1",
+        CPUINFO:
+          "model name : Intel(R) Core(TM) i9-14900KF\ncpu MHz : 3200\nlogical : 32\nload : 2",
+        MEMORY:
+          "MemTotal: 134047592 kB\nMemAvailable: 13816528 kB\nCached: 402632 kB\nSwapTotal: 39518776 kB\nSwapFree: 35962524 kB",
+        FILESYSTEMS: "C: 942362620 182437276 759925344 19% C:",
+        WINDISK: "0 C: D:|1000|2000",
+        WINNET: "Ethernet|1000|4000|0|1",
+        WINADDR: "Ethernet|10.0.0.8",
+        NVIDIA:
+          "0, NVIDIA GeForce RTX 4090, 10, 18364, 24564, 49, 13.3, 0",
+      },
+      at: 1000,
+      revision: 1,
+    });
+    expect(first.platform).toBe("windows");
+    expect(first.os).toBe("Microsoft Windows 11 专业工作站版");
+    expect(first.cpu).toMatchObject({
+      model: "Intel(R) Core(TM) i9-14900KF",
+      logicalCores: 32,
+      usagePercent: 2,
+      frequencyMHz: 3200,
+    });
+    expect(first.cpu.cores).toEqual([{ id: "0", usagePercent: 4 }]);
+    expect(first.memory?.usagePercent).toBeGreaterThan(0);
+    expect(first.filesystems[0].mount).toBe("C:");
+    expect(first.disks[0].readBytesPerSecond).toBeNull();
+    expect(first.networks[0]).toMatchObject({
+      receiveBytesPerSecond: null,
+      addresses: ["10.0.0.8"],
+    });
+    expect(first.gpus[0]).toMatchObject({
+      name: "NVIDIA GeForce RTX 4090",
+      usagePercent: 10,
+      memoryTotalBytes: 24564 * 1024 * 1024,
+    });
+    const previous = {
+      sections: {
+        PLATFORM: "Windows",
+        WINDISK: "0 C: D:|1000|2000",
+        WINNET: "Ethernet|1000|4000|0|1",
+        WINADDR: "Ethernet|10.0.0.8",
+      },
+      at: 1000,
+      revision: 1,
+    };
+    const next = buildResourceSample(
+      "host",
+      {
+        sections: {
+          ...previous.sections,
+          WINDISK: "0 C: D:|3000|2000",
+          WINNET: "Ethernet|5000|4000|0|1",
+          WINCPU: "_Total|2|1|1",
+          CPUINFO: "model name : Intel(R) Core(TM) i9-14900KF\nlogical : 32",
+          NVIDIA: "",
+        },
+        at: 3000,
+        revision: 1,
+      },
+      previous,
+    );
+    expect(next.disks[0].readBytesPerSecond).toBe(1000);
+    expect(next.networks[0].receiveBytesPerSecond).toBe(2000);
+    expect(next.gpuStatus).toBe("unavailable");
+    expect(next.gpus).toEqual([]);
+    const command = windowsProbeCommand();
+    expect(command.length).toBeLessThan(8000);
+    const script = Buffer.from(command.split(" ").at(-1) ?? "", "base64").toString(
+      "utf16le",
+    );
+    expect(script).toContain("UTF8Encoding");
+    expect(script).toContain("OpenStandardOutput");
   });
   it("reports absent GPU and unsupported platforms without fabricating measurements", () => {
     const sections = { ...linux(), NVIDIA: "" };

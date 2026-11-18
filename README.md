@@ -41,6 +41,7 @@ Remote Workbench 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 
 - 综合、CPU、显卡、内存、磁盘、网络六个视图，历史趋势、暂停与 3/5/10/30 秒刷新间隔。
 - Linux 通过固定的只读 SSH 通道读取 `/proc`、sysfs、`df` 等数据，无需远程 Agent 或 sudo；NVIDIA / AMD 依赖已安装的驱动与读取权限。
+- Windows 通过固定的只读 PowerShell 采集 CPU、内存、磁盘、网卡和 `nvidia-smi`，输出为 UTF-8。不提供 CPU 温度、IO 等待和磁盘忙碌率。
 - macOS 提供基础指标，缺失项明确显示“不可用”，不把未知数据当成 0。
 
 **文档工作区**
@@ -149,6 +150,7 @@ dsh plugin --profile desktop remove dsh-remote-workbench
 - 文本编辑仅支持 1 MiB 内 UTF-8；二进制预览和 PDF 保存上限 25 MiB；其他格式可下载。HTML / SVG 只作为源码处理。
 - PDF 编辑包括批注、表单与旋转，不包含任意排版修改、OCR、数字签名或嵌入字体替换；中文批注以图像方式嵌入。
 - macOS 不提供逐核心、磁盘 I/O 与 GPU 实时指标；Linux 速率需要两个采样点。
+- Windows 不提供 CPU 温度、IO 等待和磁盘忙碌率；磁盘与网络速率需要两个采样点。
 - 上传暂不支持目录递归与断点续传；删除目录仅限空目录。
 - 保存会检查内容变化，但 SFTP 内容核对与重命名不是跨外部进程的事务；服务器不支持原子重命名时会拒绝替换，不先删除原文件。
 - 命令不会自动重放。连接中断、取消或超时后，已发出的命令可能显示“待核对”，表示远程效果未确认，不能当作已撤销。
