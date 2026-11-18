@@ -14,7 +14,7 @@ export interface CredentialVault {
 }
 
 interface CredentialRecord {
-  kind?: string;
+  kind: "api-key" | "grant";
   payload?: unknown;
 }
 /** Structural view of DSH's credentials service; keys are branded at compile time only. */
@@ -38,7 +38,13 @@ export function createCredentialVault(
     "credentials",
   ) as CredentialRecords | undefined;
   if (!records) return undefined;
-  const keyFor = (hostId: string) => `${OWNER}/${hostId}`;
+  const keyFor = (hostId: string) => {
+    // Preserve valid keys. A UUID can start with a digit, which DSH rejects.
+    const segment = /^[a-z][a-z0-9-]*$/.test(hostId)
+      ? hostId
+      : `host-${Buffer.from(hostId, "utf8").toString("hex")}`;
+    return `${OWNER}/${segment}`;
+  };
 
   return {
     async read(hostId) {
@@ -54,11 +60,12 @@ export function createCredentialVault(
     },
     async write(hostId, credentials) {
       if (!credentials.password && !credentials.passphrase) return;
-      let next: Credentials = {};
       await records.modifyRecord(keyFor(hostId), (current) => {
         const previous = (current?.payload as Credentials | undefined) ?? {};
-        next = { ...previous, ...credentials };
-        return { kind: "ssh-credentials", payload: next };
+        const next = { ...previous, ...credentials };
+        if (next.password === undefined) delete next.password;
+        if (next.passphrase === undefined) delete next.passphrase;
+        return { kind: "grant", payload: next };
       });
     },
     async forget(hostId) {

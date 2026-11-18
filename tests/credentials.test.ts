@@ -124,7 +124,13 @@ describe("durable credentials and pre-connection grants", () => {
 });
 
 describe("DSH credential records adapter", () => {
-  it("stores per-host records through the credentials service and never returns empties", async () => {
+  const letterHostId = "a0000000-0000-4000-8000-000000000000";
+  const numericHostId = "80000000-0000-4000-8000-000000000000";
+
+  it.each([
+    [letterHostId, letterHostId],
+    [numericHostId, `host-${Buffer.from(numericHostId, "utf8").toString("hex")}`],
+  ])("stores a record DSH can reload for host %s", async (hostId, keySegment) => {
     const records = new Map<string, { kind?: string; payload?: unknown }>();
     const service = {
       async readRecord(key: string) {
@@ -138,7 +144,13 @@ describe("DSH credential records adapter", () => {
           | Promise<{ kind?: string; payload?: unknown }>
           | { kind?: string; payload?: unknown },
       ) {
-        records.set(key, await mutate(records.get(key)));
+        const record = await mutate(records.get(key));
+        expect(key).toMatch(/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*$/);
+        expect(record.kind).toBe("grant");
+        expect(record.payload).toStrictEqual(
+          JSON.parse(JSON.stringify(record.payload)),
+        );
+        records.set(key, record);
       },
       async deleteRecord(key: string) {
         records.delete(key);
@@ -148,19 +160,20 @@ describe("DSH credential records adapter", () => {
       get: (name: string) => (name === "credentials" ? service : undefined),
     } as never);
     expect(vault).toBeDefined();
-    await vault!.write("host-1", { password: "pw", passphrase: undefined });
-    await vault!.write("host-1", { passphrase: "phrase" });
-    expect(records.get("remote-workbench/host-1")?.payload).toEqual({
+    await vault!.write(hostId, { password: "pw", passphrase: undefined });
+    await vault!.write(hostId, { passphrase: "phrase" });
+    const key = `remote-workbench/${keySegment}`;
+    expect(records.get(key)?.payload).toEqual({
       password: "pw",
       passphrase: "phrase",
     });
-    expect(await vault!.read("host-1")).toEqual({
+    expect(await vault!.read(hostId)).toEqual({
       password: "pw",
       passphrase: "phrase",
     });
     expect(await vault!.read("missing")).toBeUndefined();
-    await vault!.forget("host-1");
-    expect(records.has("remote-workbench/host-1")).toBe(false);
+    await vault!.forget(hostId);
+    expect(records.has(key)).toBe(false);
     // A composition without the credentials service degrades to memory-only.
     expect(
       createCredentialVault({ get: () => undefined } as never),

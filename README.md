@@ -137,7 +137,7 @@ dsh plugin --profile desktop remove dsh-remote-workbench
 ## 安全模型
 
 - **只在本机监听**：HTTP 与终端接口仅允许 loopback，校验 Host、Origin 与页面令牌；远程部署的浏览器接入尚未开放。
-- **凭据不进配置**：密码与私钥口令保存在 DSH 凭据记录（`remote-workbench/<hostId>`），不写入插件 `state.json`，不出现在工具参数、返回值或日志里；删除连接会同时删除记录。
+- **凭据不进配置**：密码与私钥口令保存在 `remote-workbench/` 下的 DSH 凭据记录，不写入插件 `state.json`，不出现在工具参数、返回值或日志里；删除连接会同时删除记录。
 - **授权最小化**：读取、写入、Shell 执行分别授权，按会话 / 主机 / 目录 / 连接版本隔离；修改连接配置或重启 Host 后需要重新授权。
 - **主机身份固定**：首次连接必须核对 SHA-256 指纹，之后指纹变化会阻止连接。
 - **Shell 不是沙箱**：终端从授权目录启动，但拥有远端账号的系统权限；只读或写入授权不会自动开放 Shell。
@@ -155,6 +155,16 @@ dsh plugin --profile desktop remove dsh-remote-workbench
 - 保存会检查内容变化，但 SFTP 内容核对与重命名不是跨外部进程的事务；服务器不支持原子重命名时会拒绝替换，不先删除原文件。
 - 命令不会自动重放。连接中断、取消或超时后，已发出的命令可能显示“待核对”，表示远程效果未确认，不能当作已撤销。
 - 收起面板与刷新浏览器可保留 Host 中仍活跃的终端；SSH 断线、远端 Shell 退出或 Host 重启后不承诺恢复同一进程。
+
+### 旧凭据导致 DSH 启动失败
+
+如果启动日志报告 `credential key segment` 或未知的 `ssh-credentials` 类型，先退出 DSH 并备份 `$DSH_HOME/.credentials.yaml`（默认 `~/.dsh/.credentials.yaml`）。修复后的插件会保存合法的新记录，但 DSH 在加载插件之前就会读取旧文件。
+
+在 `records` 下迁移 `remote-workbench/` 中类型为 `ssh-credentials` 的旧记录。
+
+1. 将 `kind` 改为 `grant`，保留 `payload`。
+2. 如果 `remote-workbench/` 后的主机 ID 不符合 `^[a-z][a-z0-9-]*$`，用 `node -p "Buffer.from('实际主机ID', 'utf8').toString('hex')"` 生成后缀。新记录名为 `remote-workbench/host-` 加上这个后缀。
+3. 保存文件，用修复后的插件重新打开 DSH。凭据文件和备份均保存在本机。
 
 ## 开发与验证
 
