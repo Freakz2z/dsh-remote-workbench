@@ -39,7 +39,7 @@ const raw = (next: boolean, at: number, revision = 1) => ({
 });
 afterEach(() => vi.useRealTimers());
 
-describe("real resource output parsing", () => {
+describe("resource probe output parsing", () => {
   it("keeps first rates unavailable and calculates CPU, disk and network deltas", () => {
     const first = buildResourceSample("host", raw(false, 1000));
     expect(first.cpu.usagePercent).toBeNull();
@@ -99,68 +99,58 @@ describe("real resource output parsing", () => {
     expect(changed.disks[0].readBytesPerSecond).toBeNull();
   });
   it("parses Windows counters without treating a missing GPU as zero", () => {
-    const first = buildResourceSample("host", {
-      sections: {
-        PLATFORM: "Windows",
-        HOSTNAME: "win-fixture",
-        KERNEL: "10.0.22631",
-        OS: "Microsoft Windows 11 专业工作站版",
-        UPTIME: "3600",
-        WINCPU: "_Total|2|1|1\n0|4|3|1",
-        CPUINFO:
-          "model name : Intel(R) Core(TM) i9-14900KF\ncpu MHz : 3200\nlogical : 32\nload : 2",
-        MEMORY:
-          "MemTotal: 134047592 kB\nMemAvailable: 13816528 kB\nCached: 402632 kB\nSwapTotal: 39518776 kB\nSwapFree: 35962524 kB",
-        FILESYSTEMS: "C: 942362620 182437276 759925344 19% C:",
-        WINDISK: "0 C: D:|1000|2000",
-        WINNET: "Ethernet|1000|4000|0|1",
-        WINADDR: "Ethernet|10.0.0.8",
-        NVIDIA:
-          "0, NVIDIA GeForce RTX 4090, 10, 18364, 24564, 49, 13.3, 0",
-      },
-      at: 1000,
-      revision: 1,
-    });
-    expect(first.platform).toBe("windows");
-    expect(first.os).toBe("Microsoft Windows 11 专业工作站版");
-    expect(first.cpu).toMatchObject({
-      model: "Intel(R) Core(TM) i9-14900KF",
-      logicalCores: 32,
-      usagePercent: 2,
-      frequencyMHz: 3200,
-    });
-    expect(first.cpu.cores).toEqual([{ id: "0", usagePercent: 4 }]);
-    expect(first.memory?.usagePercent).toBeGreaterThan(0);
-    expect(first.filesystems[0].mount).toBe("C:");
-    expect(first.disks[0].readBytesPerSecond).toBeNull();
-    expect(first.networks[0]).toMatchObject({
-      receiveBytesPerSecond: null,
-      addresses: ["10.0.0.8"],
-    });
-    expect(first.gpus[0]).toMatchObject({
-      name: "NVIDIA GeForce RTX 4090",
-      usagePercent: 10,
-      memoryTotalBytes: 24564 * 1024 * 1024,
-    });
+    // Synthetic probe data, including a Chinese OS name and a documentation IP.
     const previous = {
       sections: {
         PLATFORM: "Windows",
-        WINDISK: "0 C: D:|1000|2000",
-        WINNET: "Ethernet|1000|4000|0|1",
-        WINADDR: "Ethernet|10.0.0.8",
+        HOSTNAME: "win-fixture",
+        KERNEL: "10.0.10000",
+        OS: "Windows 测试版",
+        UPTIME: "3600",
+        WINCPU: "_Total|2|1|1\n0|4|3|1",
+        CPUINFO:
+          "model name : Fixture CPU\ncpu MHz : 2400\nlogical : 4\nload : 2",
+        MEMORY:
+          "MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\nCached: 1048576 kB\nSwapTotal: 2097152 kB\nSwapFree: 1572864 kB",
+        FILESYSTEMS: "X: 102400 25600 76800 25% X:",
+        WINDISK: "0 X: Y:|1000|2000",
+        WINNET: "Fixture Ethernet|1000|4000|0|1",
+        WINADDR: "Fixture Ethernet|192.0.2.8",
+        NVIDIA: "0, NVIDIA Fixture GPU, 10, 1024, 8192, 40, 15.5, 20",
       },
       at: 1000,
       revision: 1,
     };
+    const first = buildResourceSample("host", previous);
+    expect(first.platform).toBe("windows");
+    expect(first.os).toBe("Windows 测试版");
+    expect(first.cpu).toMatchObject({
+      model: "Fixture CPU",
+      logicalCores: 4,
+      usagePercent: 2,
+      frequencyMHz: 2400,
+    });
+    expect(first.cpu.cores).toEqual([{ id: "0", usagePercent: 4 }]);
+    expect(first.memory?.usagePercent).toBeGreaterThan(0);
+    expect(first.filesystems[0].mount).toBe("X:");
+    expect(first.disks[0].readBytesPerSecond).toBeNull();
+    expect(first.networks[0]).toMatchObject({
+      receiveBytesPerSecond: null,
+      addresses: ["192.0.2.8"],
+    });
+    expect(first.gpus[0]).toMatchObject({
+      name: "NVIDIA Fixture GPU",
+      usagePercent: 10,
+      memoryTotalBytes: 8192 * 1024 * 1024,
+    });
     const next = buildResourceSample(
       "host",
       {
         sections: {
           ...previous.sections,
-          WINDISK: "0 C: D:|3000|2000",
-          WINNET: "Ethernet|5000|4000|0|1",
+          WINDISK: "0 X: Y:|3000|2000",
+          WINNET: "Fixture Ethernet|5000|4000|0|1",
           WINCPU: "_Total|2|1|1",
-          CPUINFO: "model name : Intel(R) Core(TM) i9-14900KF\nlogical : 32",
           NVIDIA: "",
         },
         at: 3000,
