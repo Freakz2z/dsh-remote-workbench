@@ -109,5 +109,13 @@
     "remote-workbench",
     "monitoring",
     "pdf"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Freakz2z/dsh-remote-workbench.git"
+  },
+  "homepage": "https://github.com/Freakz2z/dsh-remote-workbench#readme",
+  "bugs": {
+    "url": "https://github.com/Freakz2z/dsh-remote-workbench/issues"
+  }
 }

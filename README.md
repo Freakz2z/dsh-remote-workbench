@@ -75,7 +75,7 @@ Remote Workbench 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 
 ## 安装
 
-从 [Releases](../../releases) 下载 `dsh-remote-workbench-0.2.0.tgz`，然后安装到目标 profile：
+从 [Releases](https://github.com/Freakz2z/dsh-remote-workbench/releases) 下载 `dsh-remote-workbench-0.2.0.tgz`，然后安装到目标 profile：
 
 ```sh
 # 桌面应用
