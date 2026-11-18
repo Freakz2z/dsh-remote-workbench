@@ -1,0 +1,27 @@
+{
+  "testedAt": "2026-11-17T03:59:47.119101+00:00",
+  "dshVersion": "0.2.2-rc.3",
+  "pluginVersion": "0.2.0",
+  "surface": "macOS native desktop, dsh-app://app/",
+  "result": "passed",
+  "checks": {
+    "installedPackageMatchesArchive": true,
+    "otherProfileDependenciesAndConfigPreserved": true,
+    "nativeRightSidebarAndCentralConversation": true,
+    "agentPaneHasNoTerminalOrCommandBar": true,
+    "realResourceSampling": true,
+    "markdownSavedViaNativeUI": true,
+    "pdfPaintedViaNativeScheme": true,
+    "pdfOperatorSaved": "Desktop verified",
+    "pdfPageRotationSaved": 90,
+    "pdfRepaintAfterSaveHasNoVisibleError": true,
+    "ownTemporaryFixtureAndListenerRemoved": true,
+    "originalAbsentStateRestored": true,
+    "nativeAgentPaneLeftOpen": true
+  },
+  "limitations": [
+    "Only the temporary local OpenSSH fixture was connected; no user remote host or credentials were used.",
+    "No model message was sent in native desktop QA.",
+    "Physical Linux GPU hardware was not tested."
+  ]
+}

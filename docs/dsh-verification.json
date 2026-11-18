@@ -1,0 +1,32 @@
+{
+  "testedAt": "2026-11-17T07:25:16.283Z",
+  "dshVersion": "0.2.2-rc.3",
+  "result": "passed",
+  "checks": [
+    "isolated profile installation",
+    "native sidebar and main panel",
+    "first-use host-key UI",
+    "real SSH and PTY",
+    "SFTP editing inside the native right sidebar",
+    "session-scoped grant created from the Agent pane",
+    "8 registered tools, including read-authorized rw_resources and grant-gated rw_connect",
+    "rw_read against real OpenSSH",
+    "rw_exec denied before grant",
+    "rw_exec succeeds after grant",
+    "workbench file opens beside the conversation, not in its own column",
+    "Agent handoff dialog carries the open file",
+    "dark palette follows the DSH theme attribute",
+    "no browser runtime errors",
+    "native right sidebar guide opens the remote Agent pane",
+    "remote files in the native right sidebar with no terminal UI",
+    "all six live monitor views in the native Agent pane",
+    "Markdown draft survives monitor switching and saves over SFTP",
+    "production PDF worker paints pages without modifying the host global",
+    "PDF form and rotation persist from the native sidebar to real SFTP",
+    "pending file move rejects a changed connection without touching either path"
+  ],
+  "limitations": [
+    "No external LLM request was made; model generation is not covered by this test.",
+    "Tool bridge probe invokes registered definitions directly; it does not replace DSH tool-policy tests."
+  ]
+}

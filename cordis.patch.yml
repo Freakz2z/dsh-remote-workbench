@@ -1,0 +1,3 @@
+- insert:
+    - id: remote-workbench
+      name: dsh-remote-workbench
