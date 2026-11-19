@@ -62,7 +62,7 @@ export interface ResourceSample {
   hostId: string;
   hostRevision: number;
   sampledAt: number;
-  platform: "linux" | "darwin" | "unsupported";
+  platform: "linux" | "darwin" | "windows" | "unsupported";
   hostname: string;
   os: string;
   kernel: string;

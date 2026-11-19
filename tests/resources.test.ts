@@ -3,6 +3,7 @@ import {
   buildResourceSample,
   ResourceMonitor,
   parseResourceSections,
+  windowsProbeCommand,
 } from "../src/host/resources.ts";
 
 const linux = (next = false) => ({
@@ -38,7 +39,7 @@ const raw = (next: boolean, at: number, revision = 1) => ({
 });
 afterEach(() => vi.useRealTimers());
 
-describe("real resource output parsing", () => {
+describe("resource probe output parsing", () => {
   it("keeps first rates unavailable and calculates CPU, disk and network deltas", () => {
     const first = buildResourceSample("host", raw(false, 1000));
     expect(first.cpu.usagePercent).toBeNull();
@@ -96,6 +97,78 @@ describe("real resource output parsing", () => {
     );
     expect(changed.cpu.usagePercent).toBeNull();
     expect(changed.disks[0].readBytesPerSecond).toBeNull();
+  });
+  it("parses Windows counters without treating a missing GPU as zero", () => {
+    // Synthetic probe data, including a Chinese OS name and a documentation IP.
+    const previous = {
+      sections: {
+        PLATFORM: "Windows",
+        HOSTNAME: "win-fixture",
+        KERNEL: "10.0.10000",
+        OS: "Windows 测试版",
+        UPTIME: "3600",
+        WINCPU: "_Total|2|1|1\n0|4|3|1",
+        CPUINFO:
+          "model name : Fixture CPU\ncpu MHz : 2400\nlogical : 4\nload : 2",
+        MEMORY:
+          "MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\nCached: 1048576 kB\nSwapTotal: 2097152 kB\nSwapFree: 1572864 kB",
+        FILESYSTEMS: "X: 102400 25600 76800 25% X:",
+        WINDISK: "0 X: Y:|1000|2000",
+        WINNET: "Fixture Ethernet|1000|4000|0|1",
+        WINADDR: "Fixture Ethernet|192.0.2.8",
+        NVIDIA: "0, NVIDIA Fixture GPU, 10, 1024, 8192, 40, 15.5, 20",
+      },
+      at: 1000,
+      revision: 1,
+    };
+    const first = buildResourceSample("host", previous);
+    expect(first.platform).toBe("windows");
+    expect(first.os).toBe("Windows 测试版");
+    expect(first.cpu).toMatchObject({
+      model: "Fixture CPU",
+      logicalCores: 4,
+      usagePercent: 2,
+      frequencyMHz: 2400,
+    });
+    expect(first.cpu.cores).toEqual([{ id: "0", usagePercent: 4 }]);
+    expect(first.memory?.usagePercent).toBeGreaterThan(0);
+    expect(first.filesystems[0].mount).toBe("X:");
+    expect(first.disks[0].readBytesPerSecond).toBeNull();
+    expect(first.networks[0]).toMatchObject({
+      receiveBytesPerSecond: null,
+      addresses: ["192.0.2.8"],
+    });
+    expect(first.gpus[0]).toMatchObject({
+      name: "NVIDIA Fixture GPU",
+      usagePercent: 10,
+      memoryTotalBytes: 8192 * 1024 * 1024,
+    });
+    const next = buildResourceSample(
+      "host",
+      {
+        sections: {
+          ...previous.sections,
+          WINDISK: "0 X: Y:|3000|2000",
+          WINNET: "Fixture Ethernet|5000|4000|0|1",
+          WINCPU: "_Total|2|1|1",
+          NVIDIA: "",
+        },
+        at: 3000,
+        revision: 1,
+      },
+      previous,
+    );
+    expect(next.disks[0].readBytesPerSecond).toBe(1000);
+    expect(next.networks[0].receiveBytesPerSecond).toBe(2000);
+    expect(next.gpuStatus).toBe("unavailable");
+    expect(next.gpus).toEqual([]);
+    const command = windowsProbeCommand();
+    expect(command.length).toBeLessThan(8000);
+    const script = Buffer.from(command.split(" ").at(-1) ?? "", "base64").toString(
+      "utf16le",
+    );
+    expect(script).toContain("UTF8Encoding");
+    expect(script).toContain("OpenStandardOutput");
   });
   it("reports absent GPU and unsupported platforms without fabricating measurements", () => {
     const sections = { ...linux(), NVIDIA: "" };

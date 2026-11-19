@@ -61,6 +61,71 @@ esac
 section END
 `;
 
+/** Fixed read-only Windows collector. Invoked as powershell -EncodedCommand, not via cmd quoting. */
+const WINDOWS_PROBE_SCRIPT = `$ProgressPreference='SilentlyContinue'
+$ErrorActionPreference='SilentlyContinue'
+$u=New-Object System.Text.UTF8Encoding $false
+function E([string]$s){if($null -eq $s){$s=''};$b=$u.GetBytes($s+"\`n");[Console]::OpenStandardOutput().Write($b,0,$b.Length)}
+function S($n){E '';E ('__RW_RESOURCE_V1_'+$n+'__')}
+S PLATFORM
+E Windows
+$cs=Get-CimInstance Win32_ComputerSystem
+$os=Get-CimInstance Win32_OperatingSystem
+$cpu=@(Get-CimInstance Win32_Processor)
+$mem=Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+S HOSTNAME
+E $cs.Name
+S KERNEL
+E $os.Version
+S OS
+E $os.Caption
+S UPTIME
+$boot=$os.LastBootUpTime
+if($boot -is [string]){$boot=[Management.ManagementDateTimeConverter]::ToDateTime($boot)}
+E ([int]((Get-Date)-$boot).TotalSeconds)
+Start-Sleep -Milliseconds 800
+S WINCPU
+Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor|%{E ('{0}|{1}|{2}|{3}' -f $_.Name,$_.PercentProcessorTime,$_.PercentUserTime,$_.PercentPrivilegedTime)}
+S CPUINFO
+foreach($row in $cpu){E ('model name : {0}' -f $row.Name);E ('cpu MHz : {0}' -f $row.CurrentClockSpeed);E ('logical : {0}' -f $row.NumberOfLogicalProcessors);E ('load : {0}' -f $row.LoadPercentage)}
+S MEMORY
+E ('MemTotal: {0} kB' -f [int64]$os.TotalVisibleMemorySize)
+E ('MemAvailable: {0} kB' -f ([int64]$mem.AvailableBytes/1024))
+E ('Cached: {0} kB' -f ([int64]$mem.CacheBytes/1024))
+E ('SwapTotal: {0} kB' -f [int64]$os.SizeStoredInPagingFiles)
+E ('SwapFree: {0} kB' -f [int64]$os.FreeSpaceInPagingFiles)
+S FILESYSTEMS
+Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"|%{
+$t=[int64]($_.Size/1024);$a=[int64]($_.FreeSpace/1024);if($t -le 0){return}
+$d=$t-$a;E ('{0} {1} {2} {3} {4}% {5}' -f $_.DeviceID,$t,$d,$a,([int][math]::Floor(100.0*$d/$t)),$_.DeviceID)}
+S WINDISK
+Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk|?{$_.Name -notmatch '_Total'}|%{E ('{0}|{1}|{2}' -f $_.Name,$_.DiskReadBytesPersec,$_.DiskWriteBytesPersec)}
+S WINNET
+Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface|%{E ('{0}|{1}|{2}|{3}|{4}' -f $_.Name,$_.BytesReceivedPersec,$_.BytesSentPersec,$_.PacketsReceivedErrors,$_.PacketsOutboundErrors)}
+S WINADDR
+Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True"|%{foreach($ip in @($_.IPAddress)){if($ip -notmatch ':'){E ('{0}|{1}' -f $_.Description,$ip)}}}
+S NVIDIA
+$smi="$env:SystemRoot\\System32\\nvidia-smi.exe"
+if(-not (Test-Path -LiteralPath $smi)){$smi="$env:ProgramFiles\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"}
+if(Test-Path -LiteralPath $smi){& $smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,fan.speed --format=csv,noheader,nounits|%{E $_}}
+S END
+exit 0
+`;
+
+export function windowsProbeCommand(): string {
+  const encoded = Buffer.from(WINDOWS_PROBE_SCRIPT, "utf16le").toString("base64");
+  return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+}
+
+/** SSH on Chinese Windows emits the ANSI code page. GBK of 专业 is also valid UTF-8 for unrelated characters. */
+export function decodeProbeText(buffer: Buffer): string {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe)
+    return buffer.subarray(2).toString("utf16le");
+  if (buffer.length >= 4 && buffer[1] === 0 && buffer[3] === 0 && buffer[0] < 0x80)
+    return buffer.toString("utf16le");
+  return buffer.toString("utf8");
+}
+
 interface RawSample {
   sections: Record<string, string>;
   at: number;
@@ -77,7 +142,7 @@ const clean = (value = "") =>
   value.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "").trim();
 
 export function parseResourceSections(stdout: string): Record<string, string> {
-  const parts = stdout.split(/(?:^|\n)__RW_RESOURCE_V1_([A-Z]+)__\r?\n/);
+  const parts = stdout.split(/(?:^|[\r\n]+)__RW_RESOURCE_V1_([A-Z]+)__\r?\n/);
   const result: Record<string, string> = {};
   for (let i = 1; i + 1 < parts.length; i += 2)
     result[parts[i]] = parts[i + 1].trim();
@@ -302,11 +367,173 @@ function gpus(sections: Record<string, string>): GpuMetrics[] {
   return [...nvidia, ...amd];
 }
 
+function pipeTail(row: string, count: number) {
+  const parts = row.split("|");
+  if (parts.length < count + 1) return null;
+  const values = parts.splice(parts.length - count, count).map(Number);
+  if (values.some((n) => !Number.isFinite(n))) return null;
+  return { name: parts.join("|").trim(), values };
+}
+function windowsCpu(sections: Record<string, string>): CpuMetrics {
+  const rows = lines(sections.WINCPU).flatMap((row) => {
+    const parsed = pipeTail(row, 3);
+    if (!parsed) return [];
+    return [
+      {
+        name: parsed.name,
+        usage: parsed.values[0],
+        user: parsed.values[1],
+        system: parsed.values[2],
+      },
+    ];
+  });
+  const total = rows.find((row) => /total/i.test(row.name));
+  const info = lines(sections.CPUINFO);
+  const models = info.flatMap(
+    (row) => row.match(/^model name\s*:\s*(.+)/)?.[1] ?? [],
+  );
+  const mhz = info
+    .flatMap((row) => row.match(/^cpu MHz\s*:\s*([\d.]+)/)?.[1] ?? [])
+    .map(Number);
+  const logical = info
+    .flatMap((row) => row.match(/^logical\s*:\s*(\d+)/)?.[1] ?? [])
+    .map(Number);
+  const loads = info
+    .flatMap((row) => row.match(/^load\s*:\s*([\d.]+)/)?.[1] ?? [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n));
+  const load = loads.length
+    ? loads.reduce((sum, n) => sum + n, 0) / loads.length
+    : null;
+  const usage = total?.usage ?? load;
+  return {
+    model: clean(models[0] ?? "未知 CPU"),
+    logicalCores: logical.reduce((sum, n) => sum + n, 0) || rows.filter((row) => row !== total).length,
+    usagePercent:
+      usage === 0 && load !== null && load > 0 ? percent(load) : usage,
+    userPercent: total?.user ?? null,
+    systemPercent: total?.system ?? null,
+    ioWaitPercent: null,
+    frequencyMHz: mhz.length
+      ? mhz.reduce((sum, n) => sum + n, 0) / mhz.length
+      : null,
+    temperatureC: null,
+    load: load === null ? [] : [Number(load.toFixed(2))],
+    cores: rows
+      .filter((row) => row !== total)
+      .map((row) => ({ id: row.name, usagePercent: row.usage })),
+  };
+}
+function windowsDisks(raw: string) {
+  const result = new Map<string, { read: number; write: number }>();
+  for (const row of lines(raw)) {
+    const parsed = pipeTail(row, 2);
+    if (!parsed?.name) continue;
+    result.set(parsed.name, { read: parsed.values[0], write: parsed.values[1] });
+  }
+  return result;
+}
+function windowsNetworks(sections: Record<string, string>) {
+  const addresses = new Map<string, string[]>();
+  for (const row of lines(sections.WINADDR)) {
+    const split = row.indexOf("|");
+    if (split <= 0) continue;
+    const name = row.slice(0, split).trim();
+    const address = row.slice(split + 1).trim();
+    if (!name || !address) continue;
+    addresses.set(name, [...(addresses.get(name) ?? []), address]);
+  }
+  return lines(sections.WINNET).flatMap((row) => {
+    const parsed = pipeTail(row, 4);
+    if (!parsed?.name) return [];
+    return [
+      {
+        name: parsed.name,
+        addresses: addresses.get(parsed.name) ?? [],
+        received: parsed.values[0],
+        sent: parsed.values[1],
+        receiveErrors: parsed.values[2],
+        sendErrors: parsed.values[3],
+      },
+    ];
+  });
+}
+function buildWindowsSample(
+  hostId: string,
+  current: RawSample,
+  previous?: RawSample,
+): ResourceSample {
+  const s = current.sections;
+  const validPrevious =
+    previous?.revision === current.revision ? previous : undefined;
+  const seconds = validPrevious ? (current.at - validPrevious.at) / 1000 : 0;
+  const cpu = windowsCpu(s);
+  const memory = linuxMemory(s.MEMORY ?? "");
+  if (memory) memory.buffersBytes = null;
+  const currentDisks = windowsDisks(s.WINDISK ?? "");
+  const previousDisks = windowsDisks(validPrevious?.sections.WINDISK ?? "");
+  const disks: DiskIoMetrics[] = [...currentDisks].map(([device, c]) => ({
+    device,
+    readBytes: c.read,
+    writeBytes: c.write,
+    readBytesPerSecond: rate(c.read, previousDisks.get(device)?.read, seconds),
+    writeBytesPerSecond: rate(
+      c.write,
+      previousDisks.get(device)?.write,
+      seconds,
+    ),
+    busyPercent: null,
+  }));
+  const networks: NetworkMetrics[] = windowsNetworks(s).map((net) => {
+    const before = windowsNetworks(validPrevious?.sections ?? {}).find(
+      (row) => row.name === net.name,
+    );
+    return {
+      name: net.name,
+      addresses: net.addresses,
+      receivedBytes: net.received,
+      sentBytes: net.sent,
+      receiveErrors: net.receiveErrors,
+      sendErrors: net.sendErrors,
+      receiveBytesPerSecond: rate(net.received, before?.received, seconds),
+      sendBytesPerSecond: rate(net.sent, before?.sent, seconds),
+    };
+  });
+  const gpu = gpus(s);
+  const warnings = [
+    "Windows 不提供 CPU 温度、IO 等待和磁盘忙碌率；磁盘与网络速率从第二次采样开始。",
+  ];
+  if (!s.WINCPU) warnings.push("无法读取处理器计数器。");
+  return {
+    hostId,
+    hostRevision: current.revision,
+    sampledAt: current.at,
+    platform: "windows",
+    hostname: clean(s.HOSTNAME),
+    kernel: clean(s.KERNEL),
+    os: clean(s.OS ?? "Windows"),
+    uptimeSeconds: number(s.UPTIME?.split(/\s+/)[0]),
+    cpu,
+    memory,
+    gpus: gpu,
+    gpuStatus: gpu.length ? "available" : "unavailable",
+    gpuMessage: gpu.length
+      ? ""
+      : "未发现可读取的 NVIDIA GPU；无显卡、驱动未安装或 nvidia-smi 不在默认路径时不可用",
+    filesystems: filesystems(s.FILESYSTEMS ?? ""),
+    disks,
+    networks,
+    warnings,
+  };
+}
+
 export function buildResourceSample(
   hostId: string,
   current: RawSample,
   previous?: RawSample,
 ): ResourceSample {
+  if (current.sections.PLATFORM === "Windows")
+    return buildWindowsSample(hostId, current, previous);
   const s = current.sections;
   const platform =
     s.PLATFORM === "Linux"
@@ -407,7 +634,7 @@ export function buildResourceSample(
   const gpu = gpus(s);
   const warnings: string[] = [];
   if (platform === "unsupported")
-    warnings.push("当前系统暂不支持资源采集，已支持 Linux 和 macOS。");
+    warnings.push("当前系统暂不支持资源采集，已支持 Linux、macOS 和 Windows。");
   if (platform === "darwin")
     warnings.push(
       "macOS 可用内存依据页统计估算；逐核心使用率、磁盘 I/O 与 GPU 实时指标未暴露。",

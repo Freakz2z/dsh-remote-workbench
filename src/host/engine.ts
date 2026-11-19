@@ -21,7 +21,11 @@ import { absolutePath, shellQuote, WorkbenchError } from "./errors.ts";
 import type { CredentialVault } from "./vault.ts";
 import { Store } from "./store.ts";
 import { TaskManager } from "./tasks.ts";
-import { ResourceMonitor } from "./resources.ts";
+import {
+  ResourceMonitor,
+  decodeProbeText,
+  windowsProbeCommand,
+} from "./resources.ts";
 import { CommandService } from "./commands.ts";
 import {
   identifyFile,
@@ -280,8 +284,11 @@ export class Engine {
     });
     return connection.ready;
   }
+  private probeKind = new Map<string, "windows" | "posix">();
   disconnect(hostId: string, forget = false) {
     this.monitor.clear(hostId);
+    for (const key of this.probeKind.keys())
+      if (key.startsWith(`${hostId}:`)) this.probeKind.delete(key);
     const children = this.store.hosts().filter((h) => h.jumpHostId === hostId);
     for (const child of children) this.disconnect(child.id, forget);
     const connection = this.pool.get(hostId);
@@ -380,14 +387,68 @@ export class Engine {
         409,
       );
     const revision = entry.host.revision;
-    const client = await entry.ready;
+    const key = `${hostId}:${revision}`;
+    let kind = this.probeKind.get(key);
+    if (!kind) {
+      const echoed = await this.execProbe(hostId, "echo %OS%", 5000);
+      if (/Windows_NT/i.test(echoed.stdout)) kind = "windows";
+      else {
+        const powershell = await this.execProbe(
+          hostId,
+          'powershell.exe -NoProfile -NonInteractive -Command "Write-Output $env:OS"',
+          8000,
+        );
+        kind =
+          powershell.code === 0 && /Windows_NT/i.test(powershell.stdout)
+            ? "windows"
+            : "posix";
+      }
+      this.probeKind.set(key, kind);
+    }
+    const actual = kind === "windows" ? windowsProbeCommand() : command;
+    const ran = await this.execProbe(
+      hostId,
+      actual,
+      kind === "windows" ? 20000 : 8000,
+    );
     this.checkRevision(hostId, revision);
-    const result = await new Promise<string>((resolve, reject) => {
+    if (
+      this.pool.get(hostId) !== entry ||
+      this.states.get(hostId)?.status !== "connected"
+    )
+      throw new WorkbenchError(
+        "NOT_CONNECTED",
+        "采集期间连接已断开",
+        undefined,
+        409,
+      );
+    if (ran.code !== 0)
+      throw new WorkbenchError(
+        "METRICS_UNAVAILABLE",
+        "服务器未能完成资源采集",
+      );
+    return ran.stdout;
+  }
+  private async execProbe(
+    hostId: string,
+    command: string,
+    timeoutMs: number,
+  ): Promise<{ code: number; stdout: string }> {
+    const entry = this.pool.get(hostId);
+    if (!entry || this.states.get(hostId)?.status !== "connected")
+      throw new WorkbenchError(
+        "NOT_CONNECTED",
+        "服务器已断开连接",
+        undefined,
+        409,
+      );
+    const client = await entry.ready;
+    return new Promise((resolve, reject) => {
       let channel: ClientChannel | undefined;
       let finished = false;
       let size = 0;
       const chunks: Buffer[] = [];
-      const finish = (error?: Error) => {
+      const finish = (error?: Error, value?: { code: number; stdout: string }) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
@@ -395,7 +456,7 @@ export class Engine {
           channel?.signal("TERM");
           channel?.close();
           reject(error);
-        } else resolve(Buffer.concat(chunks).toString("utf8"));
+        } else resolve(value ?? { code: 1, stdout: "" });
       };
       const timer = setTimeout(
         () =>
@@ -405,7 +466,7 @@ export class Engine {
               "资源采集超时，可稍后手动重试",
             ),
           ),
-        8000,
+        timeoutMs,
       );
       client.exec(command, (error, stream) => {
         if (error) {
@@ -430,29 +491,13 @@ export class Engine {
         stream.stderr.on("data", () => {});
         stream.once("error", finish);
         stream.once("close", (code?: number) => {
-          if (code !== 0)
-            finish(
-              new WorkbenchError(
-                "METRICS_UNAVAILABLE",
-                "服务器未能完成资源采集",
-              ),
-            );
-          else finish();
+          finish(undefined, {
+            code: code ?? 1,
+            stdout: decodeProbeText(Buffer.concat(chunks)),
+          });
         });
       });
     });
-    this.checkRevision(hostId, revision);
-    if (
-      this.pool.get(hostId) !== entry ||
-      this.states.get(hostId)?.status !== "connected"
-    )
-      throw new WorkbenchError(
-        "NOT_CONNECTED",
-        "采集期间连接已断开",
-        undefined,
-        409,
-      );
-    return result;
   }
   private async readBytes(
     hostId: string,
