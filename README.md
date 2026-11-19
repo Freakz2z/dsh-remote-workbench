@@ -2,10 +2,10 @@
 
 **DSH 原生右侧栏里的 AI 远程工作台：SSH、SFTP、监控与文档编辑，和普通对话并排。**
 
-[![version](https://img.shields.io/badge/version-0.2.0--alpha-orange)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.2.1-orange)](CHANGELOG.md)
 [![DSH](https://img.shields.io/badge/DSH-%E2%89%A5%200.2.2--rc.3-blue)](https://github.com/deepseek-ai/deepseek-harness)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-37%20backend%20%C2%B7%2012%20UI%20%C2%B7%2024%20DSH-success)](#开发与验证)
+[![tests](https://img.shields.io/badge/tests-39%20backend%20%C2%B7%2012%20UI%20%C2%B7%2024%20DSH-success)](#开发与验证)
 
 Remote Workbench 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的第三方插件。它在 DSH **自带的右侧边栏**里打开一个远程 Agent：中央继续使用原生对话，右侧查看服务器监控、浏览和编辑远程文件，随时把文件或监控摘要交给当前会话。另有一个独立工作台，保留 SSH 终端、命令栏、隧道等完整操作。
 
@@ -15,8 +15,34 @@ Remote Workbench 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 
 ![工作台、右侧 Agent 与监控](docs/dsh-agent-rightbar-preview.png)
 
+## 快速开始
+
+> 需要 DSH `>= 0.2.2-rc.3 < 0.3.0`。桌面应用与 Web / 无头环境都通过 DSH profile 安装。
+
+```sh
+# 1. 从 npm 安装到 desktop profile（Web / 无头环境把 desktop 换成 web）
+dsh plugin --profile desktop add dsh-remote-workbench
+
+# 2. 完全退出并重新打开 DSH（⌘Q，不是只关窗口）
+
+# 3. 打开任意会话，点击标题栏的「远程 Agent」，
+#    或打开右侧栏，从「+」菜单选择「远程 Agent」
+
+# 4. 在右栏新建 SSH 连接，核对 SHA-256 主机指纹后开始使用
+```
+
+桌面应用若没有把 `dsh` 加入 `PATH`，使用内置 CLI：
+
+```sh
+/Applications/DeepSeek\ Harness.app/Contents/Resources/runtime/cli/bin/dsh \
+  plugin --profile desktop add dsh-remote-workbench
+```
+
+更完整的安装方式、连接步骤与权限说明见[安装](#安装)与[开始使用](#开始使用)。
+
 ## 目录
 
+- [快速开始](#快速开始)
 - [能力](#能力)
 - [安装](#安装)
 - [开始使用](#开始使用)
@@ -76,14 +102,14 @@ Remote Workbench 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 
 ## 安装
 
-从 [Releases](https://github.com/Freakz2z/dsh-remote-workbench/releases) 下载 `dsh-remote-workbench-0.2.0.tgz`，然后安装到目标 profile：
+### 从 npm 安装（推荐）
 
 ```sh
 # 桌面应用
-dsh plugin --profile desktop add /absolute/path/dsh-remote-workbench-0.2.0.tgz
+dsh plugin --profile desktop add dsh-remote-workbench
 
 # Web / 无头
-dsh plugin --profile web add /absolute/path/dsh-remote-workbench-0.2.0.tgz
+dsh plugin --profile web add dsh-remote-workbench
 ```
 
 桌面应用内置的 CLI 位于：
@@ -94,14 +120,22 @@ dsh plugin --profile web add /absolute/path/dsh-remote-workbench-0.2.0.tgz
 
 安装完成后**完全退出并重新打开 DSH**（⌘Q，而不是只关窗口）。客户端模块在启动时装配，只刷新页面不会加载新版本。
 
-也可以用源码直接安装：
+### 从 GitHub Release 安装
+
+从 [Releases](https://github.com/Freakz2z/dsh-remote-workbench/releases) 下载最新的 `dsh-remote-workbench-*.tgz`，然后安装到目标 profile：
+
+```sh
+dsh plugin --profile desktop add /absolute/path/dsh-remote-workbench-0.2.1.tgz
+```
+
+### 从源码安装
 
 ```sh
 npm ci && npm run build
 dsh plugin --profile desktop add /absolute/path/to/dsh-remote-workbench
 ```
 
-卸载：
+### 卸载
 
 ```sh
 dsh plugin --profile desktop remove dsh-remote-workbench
@@ -175,7 +209,7 @@ npm ci
 npm run dev                 # 本机独立预览 http://127.0.0.1:4720
                             # http://127.0.0.1:4720/?agent=1 为右栏组件预览
 npm run typecheck
-npm test                    # 37 项：真实 OpenSSH / SFTP、HTTP 边界、资源、凭据与授权
+npm test                    # 39 项：真实 OpenSSH / SFTP、HTTP 边界、资源、凭据与授权
 npx playwright install chromium
 npm run test:ui             # 12 项：浏览器交互、响应式、主题与草稿
 npm run test:dsh            # 24 项：隔离 profile 中安装真实 DSH 并验收

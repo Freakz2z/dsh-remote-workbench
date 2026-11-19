@@ -117,5 +117,8 @@
   "homepage": "https://github.com/Freakz2z/dsh-remote-workbench#readme",
   "bugs": {
     "url": "https://github.com/Freakz2z/dsh-remote-workbench/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
