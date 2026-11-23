@@ -1,56 +1,47 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  ArrowUpDown,
   ArrowUpRight,
   Check,
   CheckCheck,
   ChevronDown,
-  ChevronRight,
-  ChevronsUpDown,
+  ChevronUp,
   Circle,
-  Clock3,
-  Code2,
   Copy,
-  File,
-  FileCode2,
-  FileText,
+  Eraser,
+  FilePlus,
   Files,
   Folder,
   FolderOpen,
   FolderPlus,
-  Globe2,
-  HardDrive,
   History,
   Link2,
   LoaderCircle,
   Maximize2,
-  MessageSquare,
   MoreHorizontal,
   Pencil,
   PlugZap,
   Plus,
   RefreshCw,
   Search,
-  Send,
   Server,
   Settings2,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Square,
-  Star,
   TerminalSquare,
   Trash2,
   Unplug,
   Upload,
   X,
-  Zap,
 } from "lucide-react";
 import {
   API_PREFIX,
-  type ConnectionState,
   type Credentials,
   type FileEntry,
   type Host,
@@ -67,6 +58,13 @@ import {
   type TerminalHandle,
   type TerminalStatus,
 } from "./TerminalView.tsx";
+import { ConfirmDialog, Modal } from "./components/Modal.tsx";
+import { FileContextMenu, FileEntryIcon } from "./components/FileIcons.tsx";
+import { HostSwitcher } from "./components/HostSwitcher.tsx";
+import {
+  SshImportDialog,
+  type SshImportCandidate,
+} from "./components/SshImportDialog.tsx";
 import "./style.css";
 
 const empty: Snapshot = {
@@ -104,14 +102,22 @@ const statusLabel: Record<Task["status"], string> = {
   cancelled: "已取消",
   unknown: "待核对",
 };
-const fileIcon = (entry: FileEntry) =>
-  entry.type === "directory" ? (
-    <Folder size={16} className="rw-folder-icon" />
-  ) : /\.(tsx?|jsx?|json|ya?ml|conf|sh|py|html|css)$/.test(entry.name) ? (
-    <FileCode2 size={15} className="rw-code-icon" />
-  ) : (
-    <FileText size={15} />
-  );
+const sortFiles = (
+  list: FileEntry[],
+  key: "name" | "size" | "modified",
+  direction: 1 | -1,
+) =>
+  [...list].sort((a, b) => {
+    if (a.type === "directory" && b.type !== "directory") return -1;
+    if (b.type === "directory" && a.type !== "directory") return 1;
+    const value =
+      key === "name"
+        ? a.name.localeCompare(b.name, "zh-CN", { numeric: true })
+        : key === "size"
+          ? a.size - b.size
+          : a.modified - b.modified;
+    return value * direction;
+  });
 interface Dialog {
   title: string;
   description?: string;
@@ -137,28 +143,50 @@ export function App({
   const [snapshot, setSnapshot] = useState<Snapshot>(empty);
   const [loaded, setLoaded] = useState(false);
   const [hostId, setHostId] = useState(remembered("host"));
-  const [query, setQuery] = useState("");
   const [hostDialog, setHostDialog] = useState<{
     host?: Host | Partial<HostInput>;
+  }>();
+  const [sshImport, setSshImport] = useState<{
+    hosts: SshImportCandidate[];
+    skipped: string[];
   }>();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [directory, setDirectory] = useState("/");
   const [pathDraft, setPathDraft] = useState("/");
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [selection, setSelection] = useState<string[]>([]);
+  const [lastAnchor, setLastAnchor] = useState("");
   const [fileQuery, setFileQuery] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  const [fileSort, setFileSort] = useState<{
+    key: "name" | "size" | "modified";
+    direction: 1 | -1;
+  }>({ key: "name", direction: 1 });
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [busyHost, setBusyHost] = useState("");
   const [activeTerminal, setActiveTerminal] = useState("");
   const [terminalStatus, setTerminalStatus] = useState<
     Record<string, TerminalStatus>
   >({});
+  const [terminalNames, setTerminalNames] = useState<Record<string, string>>({});
+  const [editingTermId, setEditingTermId] = useState("");
+  const [editingTermName, setEditingTermName] = useState("");
+  const [terminalSelection, setTerminalSelection] = useState("");
+  const [termSearchOpen, setTermSearchOpen] = useState(false);
+  const [termSearchQuery, setTermSearchQuery] = useState("");
+  const [termSearchMatch, setTermSearchMatch] = useState<{
+    current: number;
+    total: number;
+  }>();
   const [commandDraft, setCommandDraft] = useState("");
   const [commandLibrary, setCommandLibrary] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
+  const [taskFilter, setTaskFilter] = useState<"all" | "running" | "issue">(
+    "all",
+  );
   const [taskDetail, setTaskDetail] = useState<Task>();
   const [dialog, setDialog] = useState<Dialog>();
+  const [bulkDelete, setBulkDelete] = useState<string[]>();
   const [trust, setTrust] = useState<{
     hostId: string;
     address: string;
@@ -175,7 +203,6 @@ export function App({
   const [dragging, setDragging] = useState(false);
   const [tunnelOpen, setTunnelOpen] = useState(false);
   const [fileWidth, setFileWidth] = useState(280);
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
   const terminalRefs = useRef(new Map<string, TerminalHandle>());
   const switchButtonRef = useRef<HTMLButtonElement>(null);
@@ -191,11 +218,34 @@ export function App({
   const currentTerminal =
     hostTerminals.find((t) => t.id === activeTerminal) ?? hostTerminals.at(-1);
   const runningTasks = snapshot.tasks.filter((t) => t.status === "running");
-  const filteredEntries = entries.filter(
-    (e) =>
-      (showHidden || !e.name.startsWith(".")) &&
-      e.name.toLowerCase().includes(fileQuery.toLowerCase()),
+  const issueTasks = snapshot.tasks.filter(
+    (t) => t.status === "failed" || t.status === "unknown",
   );
+  const filteredTasks = snapshot.tasks.filter((t) =>
+    taskFilter === "running"
+      ? t.status === "running"
+      : taskFilter === "issue"
+        ? t.status === "failed" || t.status === "unknown"
+        : true,
+  );
+  const filteredEntries = useMemo(() => {
+    const list = entries.filter(
+      (e) =>
+        (showHidden || !e.name.startsWith(".")) &&
+        e.name.toLowerCase().includes(fileQuery.toLowerCase()),
+    );
+    return sortFiles(list, fileSort.key, fileSort.direction);
+  }, [entries, showHidden, fileQuery, fileSort]);
+  const fileBreadcrumbs = useMemo(() => {
+    const parts = directory.split("/").filter(Boolean);
+    const list = [{ label: "/", path: "/" }];
+    let current = "";
+    for (const part of parts) {
+      current += "/" + part;
+      list.push({ label: part, path: current });
+    }
+    return list;
+  }, [directory]);
   const toast = useCallback(
     (text: string, error = false) => setNotice({ text, error }),
     [],
@@ -239,23 +289,14 @@ export function App({
     return () => clearTimeout(t);
   }, [notice]);
   useEffect(() => {
-    const close = () => {
-      setContextMenu(undefined);
-      setSwitcherOpen((open) => {
-        // Escape and outside clicks hand focus back to the trigger.
-        if (open) switchButtonRef.current?.focus();
-        return false;
-      });
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSwitcherOpen((open) => !open);
+      }
     };
-    document.addEventListener("pointerdown", close);
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("pointerdown", close);
-      document.removeEventListener("keydown", esc);
-    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
   const loadFiles = useCallback(
     async (id: string, path: string) => {
@@ -317,7 +358,6 @@ export function App({
       closeSwitcher();
       return;
     }
-    setQuery("");
     setSwitcherOpen(true);
   };
   // Closing returns focus to the trigger, like a DSH menu.
@@ -329,17 +369,30 @@ export function App({
     setSwitcherOpen(false);
     void run(async () => {
       const value = await api.post<{
-        hosts: (Partial<HostInput> & { note?: string })[];
+        hosts: SshImportCandidate[];
         skipped: string[];
       }>("/ssh/import", {});
       if (!value.hosts.length) {
         toast("没有找到可导入的明确 Host 配置");
         return;
       }
-      setHostDialog({ host: value.hosts[0] });
-      toast(
-        `发现 ${value.hosts.length} 个配置，先预览第一个；通配符与复杂配置需手动确认`,
-      );
+      if (value.hosts.length === 1) {
+        const first = value.hosts[0]!;
+        setHostDialog({
+          host: {
+            ...first,
+            auth:
+              first.auth === "agent" || !first.auth
+                ? first.privateKeyPath
+                  ? "key"
+                  : "password"
+                : first.auth,
+          },
+        });
+        toast("发现 1 个配置，确认后保存");
+      } else {
+        setSshImport({ hosts: value.hosts, skipped: value.skipped ?? [] });
+      }
     });
   };
   const openTerminal = async (id = hostId, cwd = directory) => {
@@ -385,7 +438,8 @@ export function App({
       )
         setDialog({
           title: "输入连接密码",
-          description: "密码仅保存在当前宿主进程内存，断开后清除。",
+          description:
+            "密码将安全保存到 DSH 凭据库，重连自动复用，随时可在编辑连接中忘记。",
           confirm: "连接",
           input: true,
           password: true,
@@ -469,6 +523,7 @@ export function App({
           下载文件
         </button>
       )}
+      <div className="rw-menu-sep" />
       <button
         onClick={() => {
           const boundId = hostId;
@@ -485,6 +540,7 @@ export function App({
                 hostId: boundId,
                 path: entry.path,
                 target: remoteJoin(parentPath(entry.path), name),
+                hostRevision: host?.revision,
               });
               if (selectedHostRef.current === boundId)
                 await loadFiles(boundId, directory);
@@ -494,6 +550,65 @@ export function App({
       >
         <Pencil size={14} />
         重命名
+      </button>
+      <button
+        onClick={() => {
+          const boundId = hostId;
+          const boundRev = host?.revision;
+          setDialog({
+            title: "复制到…",
+            description: entry.path,
+            input: true,
+            initial: entry.name + ".bak",
+            placeholder: "目标文件名或绝对路径",
+            confirm: "复制",
+            action: async (name) => {
+              const target = name.trim().startsWith("/")
+                ? name.trim()
+                : remoteJoin(directory, name.trim());
+              await api.post("/files/copy", {
+                hostId: boundId,
+                path: entry.path,
+                target,
+                hostRevision: boundRev,
+              });
+              if (selectedHostRef.current === boundId)
+                await loadFiles(boundId, directory);
+            },
+          });
+        }}
+      >
+        <Copy size={14} />
+        复制到…
+      </button>
+      <button
+        onClick={() => {
+          const boundId = hostId;
+          const boundRev = host?.revision;
+          setDialog({
+            title: "修改权限",
+            description: entry.path,
+            input: true,
+            initial: entry.mode.replace(/^0+/, "") || "644",
+            placeholder: "例如 644 或 0755",
+            confirm: "保存权限",
+            action: async (mode) => {
+              if (!/^[0-7]{3,4}$/.test(mode.trim()))
+                throw new Error("请输入 3 或 4 位八进制权限，例如 644 或 0755");
+              await api.post("/files/chmod", {
+                hostId: boundId,
+                path: entry.path,
+                mode: mode.trim(),
+                hostRevision: boundRev,
+              });
+              if (selectedHostRef.current === boundId)
+                await loadFiles(boundId, directory);
+            },
+          });
+        }}
+      >
+        <ShieldAlert size={14} />
+        修改权限
       </button>
       <button
         className="danger"
@@ -644,18 +759,11 @@ export function App({
             </p>
             {switcherOpen && (
               <HostSwitcher
+                id="rw-host-switcher"
+                ariaLabel="切换服务器"
                 hosts={snapshot.hosts}
                 connections={snapshot.connections}
                 currentHostId={hostId}
-                query={query}
-                collapsed={collapsed}
-                onQuery={setQuery}
-                onToggleGroup={(group) =>
-                  setCollapsed((prev) => ({
-                    ...prev,
-                    [group]: !prev[group],
-                  }))
-                }
                 onSelect={(value) => {
                   closeSwitcher();
                   chooseHost(value.id);
@@ -669,7 +777,11 @@ export function App({
                   setHostDialog({});
                 }}
                 onImport={importSshConfig}
-                onEdit={
+                onEditHost={(value) => {
+                  closeSwitcher();
+                  setHostDialog({ host: value });
+                }}
+                onEditCurrent={
                   host
                     ? () => {
                         closeSwitcher();
@@ -854,6 +966,21 @@ export function App({
                   </button>
                 </div>
               </div>
+              {connected && (
+                <div className="rw-file-crumbs">
+                  {fileBreadcrumbs.map((crumb, idx) => (
+                    <span key={crumb.path}>
+                      {idx > 0 && <span className="rw-crumb-sep">/</span>}
+                      <button
+                        type="button"
+                        onClick={() => void loadFiles(hostId, crumb.path)}
+                      >
+                        {crumb.label}
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <form
                 className="rw-path"
                 onSubmit={(e) => {
@@ -890,6 +1017,38 @@ export function App({
                   上传
                 </button>
                 <button
+                  className="rw-icon"
+                  aria-label="新建文件"
+                  title="新建文件"
+                  disabled={!connected}
+                  onClick={() => {
+                    const id = hostId;
+                    const cwd = directory;
+                    const rev = host?.revision;
+                    setDialog({
+                      title: "新建文件",
+                      input: true,
+                      placeholder: "例如 notes.md",
+                      confirm: "创建",
+                      action: async (name) => {
+                        if (!name || /[\/\0]/.test(name))
+                          throw new Error("请输入有效的文件名称");
+                        await api.post("/files/create", {
+                          hostId: id,
+                          path: remoteJoin(cwd, name),
+                          content: "",
+                          hostRevision: rev,
+                        });
+                        if (selectedHostRef.current === id)
+                          await loadFiles(id, cwd);
+                      },
+                    });
+                  }}
+                >
+                  <FilePlus size={14} />
+                </button>
+                <button
+                  className="rw-icon"
                   aria-label="新建文件夹"
                   title="新建文件夹"
                   disabled={!connected}
@@ -915,6 +1074,22 @@ export function App({
                   }}
                 >
                   <FolderPlus size={14} />
+                </button>
+                <button
+                  className="rw-icon"
+                  aria-label="排序"
+                  title={`排序：${fileSort.key === "name" ? "名称" : fileSort.key === "size" ? "大小" : "时间"}`}
+                  onClick={() =>
+                    setFileSort((prev) =>
+                      prev.key === "name"
+                        ? { key: "modified", direction: -1 }
+                        : prev.key === "modified"
+                          ? { key: "size", direction: -1 }
+                          : { key: "name", direction: 1 },
+                    )
+                  }
+                >
+                  <ArrowUpDown size={13} />
                 </button>
                 <div className="rw-file-search">
                   <Search size={12} />
@@ -960,19 +1135,59 @@ export function App({
                           "rw-file-row " +
                           (selection.includes(entry.path) ? "selected" : "")
                         }
-                        onClick={(e) =>
+                        onClick={(e) => {
+                          if (e.shiftKey && lastAnchor) {
+                            const paths = filteredEntries.map((v) => v.path);
+                            const a = paths.indexOf(lastAnchor);
+                            const b = paths.indexOf(entry.path);
+                            if (a >= 0 && b >= 0) {
+                              const [from, to] = a < b ? [a, b] : [b, a];
+                              setSelection(paths.slice(from, to + 1));
+                              return;
+                            }
+                          }
+                          setLastAnchor(entry.path);
                           setSelection((prev) =>
                             e.metaKey || e.ctrlKey
                               ? prev.includes(entry.path)
                                 ? prev.filter((p) => p !== entry.path)
                                 : [...prev, entry.path]
                               : [entry.path],
-                          )
-                        }
+                          );
+                        }}
                         onDoubleClick={() => openFile(entry)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") openFile(entry);
-                          if (
+                          if (e.key === "Enter") {
+                            openFile(entry);
+                          } else if (
+                            e.key === "Backspace" &&
+                            directory !== "/"
+                          ) {
+                            e.preventDefault();
+                            void loadFiles(hostId, parentPath(directory));
+                          } else if (
+                            e.key === "ArrowDown" ||
+                            e.key === "ArrowUp"
+                          ) {
+                            e.preventDefault();
+                            const rows = Array.from(
+                              e.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
+                                "[role='option']",
+                              ) ?? [],
+                            );
+                            const idx = rows.indexOf(e.currentTarget);
+                            const nextIdx =
+                              e.key === "ArrowDown"
+                                ? Math.min(rows.length - 1, idx + 1)
+                                : Math.max(0, idx - 1);
+                            const nextEl = rows[nextIdx];
+                            const nextEntry = filteredEntries[nextIdx];
+                            if (nextEl && nextEntry) {
+                              nextEl.focus();
+                              setSelection([nextEntry.path]);
+                              setLastAnchor(nextEntry.path);
+                            }
+                          } else if (
                             e.key === "ContextMenu" ||
                             (e.shiftKey && e.key === "F10")
                           ) {
@@ -990,14 +1205,14 @@ export function App({
                           e.preventDefault();
                           setSelection([entry.path]);
                           setContextMenu({
-                            x: Math.min(e.clientX, window.innerWidth - 200),
-                            y: Math.min(e.clientY, window.innerHeight - 265),
+                            x: e.clientX,
+                            y: e.clientY,
                             entry,
                           });
                         }}
                       >
                         <span className="rw-file-name">
-                          {fileIcon(entry)}
+                          <FileEntryIcon entry={entry} size={15} />
                           <span>{entry.name}</span>
                           {entry.type === "symlink" && <Link2 size={10} />}
                         </span>
@@ -1030,36 +1245,66 @@ export function App({
               </div>
               {selection.length > 0 && connected && (
                 <div className="rw-selection-actions">
-                  {selection.length === 1 && (
-                    <button
-                      onClick={() => {
-                        const entry = entries.find(
-                          (e) => e.path === selection[0],
-                        );
-                        if (entry) openFile(entry);
-                      }}
-                    >
-                      <ArrowUpRight size={13} />
-                      在右侧栏打开
-                    </button>
-                  )}
-                  {selection.length === 1 && (
-                    <button
-                      onClick={(e) => {
-                        const r = e.currentTarget.getBoundingClientRect();
-                        const entry = entries.find(
-                          (f) => f.path === selection[0],
-                        );
-                        if (entry)
-                          setContextMenu({
-                            x: r.left,
-                            y: Math.min(r.bottom, window.innerHeight - 265),
-                            entry,
-                          });
-                      }}
-                    >
-                      <MoreHorizontal size={15} />
-                    </button>
+                  {selection.length === 1 ? (
+                    <>
+                      <button
+                        onClick={() => {
+                          const entry = entries.find(
+                            (e) => e.path === selection[0],
+                          );
+                          if (entry) openFile(entry);
+                        }}
+                      >
+                        <ArrowUpRight size={13} />
+                        在右侧栏打开
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          const entry = entries.find(
+                            (f) => f.path === selection[0],
+                          );
+                          if (entry)
+                            setContextMenu({
+                              x: r.left,
+                              y: r.bottom,
+                              entry,
+                            });
+                        }}
+                      >
+                        <MoreHorizontal size={15} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => {
+                          void navigator.clipboard
+                            .writeText(selection.join("\n"))
+                            .then(() =>
+                              toast(`已复制 ${selection.length} 条路径`),
+                            )
+                            .catch(failure);
+                        }}
+                      >
+                        <Copy size={13} />
+                        复制路径
+                      </button>
+                      <button
+                        className="danger"
+                        onClick={() => setBulkDelete([...selection])}
+                      >
+                        <Trash2 size={13} />
+                        批量删除 ({selection.length})
+                      </button>
+                      <button
+                        title="取消选择"
+                        aria-label="取消选择"
+                        onClick={() => setSelection([])}
+                      >
+                        <X size={13} />
+                      </button>
+                    </>
                   )}
                 </div>
               )}
@@ -1093,45 +1338,94 @@ export function App({
                 <div className="rw-terminal-tabs">
                   <div className="rw-terminal-tab-list">
                     {hostTerminals.length ? (
-                      hostTerminals.map((t, n) => (
-                        <div
-                          key={t.id}
-                          className={
-                            "rw-terminal-tab " +
-                            (currentTerminal?.id === t.id ? "active" : "")
-                          }
-                        >
-                          <button
-                            onClick={() => {
-                              setActiveTerminal(t.id);
-                              remember("terminal:" + hostId, t.id);
-                            }}
-                          >
-                            <TerminalSquare size={13} />
-                            <span>终端 {n + 1}</span>
-                            {t.status === "running" && <i />}
-                          </button>
-                          <button
-                            aria-label={`关闭终端 ${n + 1}`}
-                            onClick={() =>
-                              setDialog({
-                                title: "关闭远程终端？",
-                                description:
-                                  "关闭会请求结束远端 Shell；收起或切换面板可保留会话。",
-                                confirm: "关闭终端",
-                                action: async () => {
-                                  await api.post("/terminals/close", {
-                                    id: t.id,
-                                  });
-                                  await refresh();
-                                },
-                              })
+                      hostTerminals.map((t, n) => {
+                        const label =
+                          terminalNames[t.id] ||
+                          remembered("term-name:" + t.id) ||
+                          `终端 ${n + 1}`;
+                        return (
+                          <div
+                            key={t.id}
+                            className={
+                              "rw-terminal-tab " +
+                              (currentTerminal?.id === t.id ? "active" : "")
                             }
                           >
-                            <X size={12} />
-                          </button>
-                        </div>
-                      ))
+                            {editingTermId === t.id ? (
+                              <input
+                                className="rw-terminal-rename"
+                                autoFocus
+                                value={editingTermName}
+                                onChange={(e) =>
+                                  setEditingTermName(e.target.value)
+                                }
+                                onBlur={() => {
+                                  const next = editingTermName.trim();
+                                  if (next) {
+                                    setTerminalNames((prev) => ({
+                                      ...prev,
+                                      [t.id]: next,
+                                    }));
+                                    remember("term-name:" + t.id, next);
+                                  }
+                                  setEditingTermId("");
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.currentTarget.blur();
+                                  } else if (e.key === "Escape") {
+                                    setEditingTermId("");
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  setActiveTerminal(t.id);
+                                  remember("terminal:" + hostId, t.id);
+                                }}
+                                onDoubleClick={() => {
+                                  setEditingTermId(t.id);
+                                  setEditingTermName(label);
+                                }}
+                                title="双击重命名终端标签"
+                              >
+                                <TerminalSquare size={13} />
+                                <span>{label}</span>
+                                {t.status === "running" && <i />}
+                              </button>
+                            )}
+                            <button
+                              aria-label={`关闭${label}`}
+                              onClick={() => {
+                                if (t.status === "exited") {
+                                  void run(async () => {
+                                    await api.post("/terminals/close", {
+                                      id: t.id,
+                                    });
+                                    await refresh();
+                                  });
+                                  return;
+                                }
+                                setDialog({
+                                  title: "关闭远程终端？",
+                                  description:
+                                    "关闭会请求结束远端 Shell；收起或切换面板可保留会话。",
+                                  confirm: "关闭终端",
+                                  action: async () => {
+                                    await api.post("/terminals/close", {
+                                      id: t.id,
+                                    });
+                                    await refresh();
+                                  },
+                                });
+                              }}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        );
+                      })
                     ) : (
                       <div className="rw-terminal-label">
                         <TerminalSquare size={14} />
@@ -1150,9 +1444,133 @@ export function App({
                     </button>
                   </div>
                   <div className="rw-terminal-tools">
+                    {currentTerminal && terminalSelection && (
+                      <button
+                        type="button"
+                        title="复制终端选中文本"
+                        onClick={() => {
+                          void navigator.clipboard
+                            .writeText(terminalSelection)
+                            .then(() => toast("已复制终端选中内容"))
+                            .catch(failure);
+                        }}
+                      >
+                        <Copy size={12} />
+                        复制选中
+                      </button>
+                    )}
+                    {currentTerminal && (
+                      <>
+                        <button
+                          type="button"
+                          aria-label="查找终端输出"
+                          title="查找终端输出"
+                          onClick={() => setTermSearchOpen((v) => !v)}
+                        >
+                          <Search size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="清屏"
+                          title="清空当前终端屏幕"
+                          onClick={() =>
+                            terminalRefs.current.get(currentTerminal.id)?.clear()
+                          }
+                        >
+                          <Eraser size={13} />
+                        </button>
+                      </>
+                    )}
                     <span className="rw-terminal-mode">SSH</span>
                   </div>
                 </div>
+                {termSearchOpen && currentTerminal && (
+                  <form
+                    className="rw-term-search"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const res = terminalRefs.current
+                        .get(currentTerminal.id)
+                        ?.find(termSearchQuery, "next");
+                      if (res)
+                        setTermSearchMatch({
+                          current: res.current,
+                          total: res.total,
+                        });
+                    }}
+                  >
+                    <Search size={12} />
+                    <input
+                      autoFocus
+                      aria-label="搜索终端输出"
+                      placeholder="搜索终端缓冲区…"
+                      value={termSearchQuery}
+                      onChange={(e) => {
+                        const q = e.target.value;
+                        setTermSearchQuery(q);
+                        if (!q) {
+                          setTermSearchMatch(undefined);
+                          return;
+                        }
+                        const res = terminalRefs.current
+                          .get(currentTerminal.id)
+                          ?.find(q, "next");
+                        if (res)
+                          setTermSearchMatch({
+                            current: res.current,
+                            total: res.total,
+                          });
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") setTermSearchOpen(false);
+                      }}
+                    />
+                    {termSearchMatch && (
+                      <span className="rw-term-search-count">
+                        {termSearchMatch.current}/{termSearchMatch.total}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      aria-label="上一个匹配"
+                      onClick={() => {
+                        const res = terminalRefs.current
+                          .get(currentTerminal.id)
+                          ?.find(termSearchQuery, "prev");
+                        if (res)
+                          setTermSearchMatch({
+                            current: res.current,
+                            total: res.total,
+                          });
+                      }}
+                    >
+                      <ChevronUp size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="下一个匹配"
+                      onClick={() => {
+                        const res = terminalRefs.current
+                          .get(currentTerminal.id)
+                          ?.find(termSearchQuery, "next");
+                        if (res)
+                          setTermSearchMatch({
+                            current: res.current,
+                            total: res.total,
+                          });
+                      }}
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="关闭搜索"
+                      onClick={() => setTermSearchOpen(false)}
+                    >
+                      <X size={13} />
+                    </button>
+                  </form>
+                )}
                 <div className="rw-terminal-body">
                   {snapshot.terminals.map((t) => (
                     <TerminalView
@@ -1163,7 +1581,8 @@ export function App({
                         if (handle) terminalRefs.current.set(t.id, handle);
                         else terminalRefs.current.delete(t.id);
                       }}
-                      onSelection={() => {}}
+                      onSelection={setTerminalSelection}
+                      onRestart={() => void run(() => openTerminal())}
                       onStatus={(status) =>
                         setTerminalStatus((prev) =>
                           prev[status.id]?.state === status.state &&
@@ -1206,7 +1625,7 @@ export function App({
                         <ArrowUpRight size={13} />
                       </button>
                       <span className="rw-terminal-empty-caption">
-                        文件在左，AI 在右，终端始终在手边。
+                        文件与终端共用同一条 SSH 连接，双击文件在右侧栏编辑。
                       </span>
                     </div>
                   )}
@@ -1270,6 +1689,10 @@ export function App({
                 <span className="rw-task-count">
                   {runningTasks.length} 进行中
                 </span>
+              ) : issueTasks.length > 0 ? (
+                <span className="rw-task-count issue">
+                  {issueTasks.length} 项异常
+                </span>
               ) : (
                 <span>
                   {snapshot.tasks.length
@@ -1280,8 +1703,12 @@ export function App({
             </div>
             <div>
               <span className="rw-taskbar-health">
-                <i />
-                {runningTasks.length ? "后台任务运行中" : "工作台就绪"}
+                <i className={issueTasks.length && !runningTasks.length ? "warn" : ""} />
+                {runningTasks.length
+                  ? "后台任务运行中"
+                  : issueTasks.length
+                    ? "有异常任务待查看"
+                    : "工作台就绪"}
               </span>
               <ChevronDown
                 size={13}
@@ -1291,13 +1718,40 @@ export function App({
           </button>
           {taskOpen && (
             <div className="rw-tasks">
-              {snapshot.tasks.length === 0 ? (
+              {snapshot.tasks.length > 0 && (
+                <div className="rw-task-filters">
+                  {(
+                    [
+                      { id: "all", label: `全部 (${snapshot.tasks.length})` },
+                      {
+                        id: "running",
+                        label: `进行中 (${runningTasks.length})`,
+                      },
+                      { id: "issue", label: `异常 (${issueTasks.length})` },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={taskFilter === item.id ? "active" : ""}
+                      onClick={() => setTaskFilter(item.id)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {filteredTasks.length === 0 ? (
                 <div className="rw-task-empty">
                   <CheckCheck size={20} />
-                  <span>上传、下载和 AI 命令会显示在这里</span>
+                  <span>
+                    {snapshot.tasks.length
+                      ? "当前筛选下没有任务记录"
+                      : "上传、下载和 AI 命令会显示在这里"}
+                  </span>
                 </div>
               ) : (
-                snapshot.tasks.slice(0, 25).map((task) => (
+                filteredTasks.slice(0, 25).map((task) => (
                   <div className="rw-task-row" key={task.id}>
                     <span className={"rw-task-status " + task.status}>
                       {task.status === "running" ? (
@@ -1406,59 +1860,103 @@ export function App({
           }
         />
       )}
+      {sshImport && (
+        <SshImportDialog
+          hosts={sshImport.hosts}
+          skipped={sshImport.skipped}
+          onClose={() => setSshImport(undefined)}
+          onImportSelected={async (items) => {
+            let firstId = "";
+            for (const item of items) {
+              const saved = await api.post<Host>("/hosts/save", item);
+              if (!firstId) firstId = saved.id;
+            }
+            await refresh();
+            if (firstId) chooseHost(firstId);
+            toast(`已导入 ${items.length} 个主机配置`);
+          }}
+          onEditOne={(candidate) => {
+            setSshImport(undefined);
+            setHostDialog({ host: candidate });
+          }}
+        />
+      )}
+      {bulkDelete && (
+        <ConfirmDialog
+          title={`批量删除 ${bulkDelete.length} 个远程项目？`}
+          description={`将删除所选的 ${bulkDelete.length} 个文件/空目录，删除后无法恢复。`}
+          confirm="全部删除"
+          danger
+          onClose={() => setBulkDelete(undefined)}
+          onConfirm={async () => {
+            const targets = bulkDelete;
+            const boundId = hostId;
+            setBulkDelete(undefined);
+            for (const p of targets) {
+              try {
+                await api.post("/files/remove", { hostId: boundId, path: p });
+              } catch (e) {
+                failure(e);
+              }
+            }
+            if (selectedHostRef.current === boundId)
+              await loadFiles(boundId, directory);
+          }}
+        />
+      )}
       {dialog && (
         <ActionDialog dialog={dialog} onClose={() => setDialog(undefined)} />
       )}
       {trust && (
-        <div className="rw-modal-backdrop">
-          <section
-            className="rw-modal rw-trust"
-            role="dialog"
-            aria-modal="true"
-            aria-label="核对服务器指纹"
-          >
-            <div className="rw-modal-icon">
-              <ShieldCheck size={25} />
-            </div>
-            <h2>核对这台服务器的身份</h2>
-            <p>
-              首次连接 {trust.address}。请与服务器管理者提供的指纹核对后保存。
-            </p>
-            <div className="rw-fingerprint">
-              <small>{trust.algorithm}</small>
-              <code>{trust.fingerprint}</code>
-            </div>
-            <footer>
-              <button className="rw-button" onClick={() => setTrust(undefined)}>
-                取消连接
-              </button>
-              <button
-                className="rw-button primary"
-                onClick={() => {
-                  const value = trust;
-                  setTrust(undefined);
-                  void run(async () => {
-                    await api.post("/trust", value);
-                    await connectHost(value.resumeHostId ?? value.hostId);
-                  });
-                }}
-              >
-                信任并连接
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          ariaLabel="核对服务器指纹"
+          className="rw-trust"
+          onClose={() => setTrust(undefined)}
+        >
+          <div className="rw-modal-icon">
+            <ShieldCheck size={25} />
+          </div>
+          <h2>核对这台服务器的身份</h2>
+          <p>
+            首次连接 {trust.address}。请与服务器管理者提供的指纹核对后保存。
+          </p>
+          <div className="rw-fingerprint">
+            <small>{trust.algorithm}</small>
+            <code>{trust.fingerprint}</code>
+          </div>
+          <footer>
+            <button
+              type="button"
+              className="rw-button"
+              onClick={() => setTrust(undefined)}
+            >
+              取消连接
+            </button>
+            <button
+              type="button"
+              className="rw-button primary"
+              onClick={() => {
+                const value = trust;
+                setTrust(undefined);
+                void run(async () => {
+                  await api.post("/trust", value);
+                  await connectHost(value.resumeHostId ?? value.hostId);
+                });
+              }}
+            >
+              信任并连接
+            </button>
+          </footer>
+        </Modal>
       )}
       {contextMenu && (
-        <div
-          className="rw-context-menu"
-          role="menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => setContextMenu(undefined)}
+        <FileContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(undefined)}
         >
           {fileActions(contextMenu.entry)}
-        </div>
+        </FileContextMenu>
       )}
       {notice && (
         <div
@@ -1473,38 +1971,44 @@ export function App({
         </div>
       )}
       {taskDetail && (
-        <div className="rw-modal-backdrop">
-          <section
-            className="rw-modal rw-task-detail"
-            role="dialog"
-            aria-modal="true"
-            aria-label="任务详情"
-          >
-            <header>
-              <TerminalSquare size={18} />
-              <h2>操作记录</h2>
-              <button
-                className="rw-icon"
-                aria-label="关闭任务详情"
-                onClick={() => setTaskDetail(undefined)}
-              >
-                <X size={17} />
-              </button>
-            </header>
-            <p>
-              {taskDetail.hostName} · {statusLabel[taskDetail.status]}
-            </p>
-            <code>{taskDetail.command ?? taskDetail.label}</code>
-            <pre>
-              {taskDetail.output ||
-                taskDetail.error ||
-                "操作已完成，无文本输出。"}
-            </pre>
-            {taskDetail.error && taskDetail.output && (
-              <div className="rw-error">{taskDetail.error}</div>
-            )}
-          </section>
-        </div>
+        <Modal
+          ariaLabel="任务详情"
+          className="rw-task-detail"
+          onClose={() => setTaskDetail(undefined)}
+        >
+          <header>
+            <TerminalSquare size={18} />
+            <h2>操作记录</h2>
+            <button
+              type="button"
+              className="rw-icon"
+              aria-label="关闭任务详情"
+              onClick={() => setTaskDetail(undefined)}
+            >
+              <X size={17} />
+            </button>
+          </header>
+          <p>
+            {taskDetail.hostName} · {statusLabel[taskDetail.status]}
+          </p>
+          {taskDetail.status === "unknown" && (
+            <div className="rw-unknown-callout">
+              <ShieldAlert size={14} />
+              <span>
+                连接中断或超时导致结果未知：远端操作可能已生效，请核对后再重试。
+              </span>
+            </div>
+          )}
+          <code>{taskDetail.command ?? taskDetail.label}</code>
+          <pre>
+            {taskDetail.output ||
+              taskDetail.error ||
+              "操作已完成，无文本输出。"}
+          </pre>
+          {taskDetail.error && taskDetail.output && (
+            <div className="rw-error">{taskDetail.error}</div>
+          )}
+        </Modal>
       )}
       {tunnelOpen && host && (
         <TunnelDialog
@@ -1515,231 +2019,6 @@ export function App({
         />
       )}
     </div>
-  );
-}
-
-function HostSwitcher({
-  hosts,
-  connections,
-  currentHostId,
-  query,
-  collapsed,
-  onQuery,
-  onToggleGroup,
-  onSelect,
-  onConnect,
-  onNew,
-  onImport,
-  onEdit,
-  onTunnel,
-  onClose,
-}: {
-  hosts: Host[];
-  connections: ConnectionState[];
-  currentHostId: string;
-  query: string;
-  collapsed: Record<string, boolean>;
-  onQuery(value: string): void;
-  onToggleGroup(group: string): void;
-  onSelect(host: Host): void;
-  onConnect(host: Host): void;
-  onNew(): void;
-  onImport(): void;
-  onEdit?(): void;
-  onTunnel?(): void;
-  onClose(): void;
-}) {
-  const normalized = query.trim().toLowerCase();
-  const matched = hosts.filter((h) =>
-    `${h.name} ${h.address} ${h.username}`.toLowerCase().includes(normalized),
-  );
-  const groups = [...new Set(hosts.map((h) => h.group || "未分组"))];
-  const stateOf = (id: string) =>
-    connections.find((c) => c.hostId === id)?.status ?? "disconnected";
-  return (
-    <>
-      <div className="rw-switcher-scrim" onClick={onClose} />
-      <section
-        className="rw-switcher"
-        id="rw-host-switcher"
-        role="dialog"
-        aria-label="切换服务器"
-        onPointerDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (
-            e.key !== "ArrowDown" &&
-            e.key !== "ArrowUp" &&
-            e.key !== "Home" &&
-            e.key !== "End"
-          )
-            return;
-          const items = Array.from(
-            e.currentTarget.querySelectorAll<HTMLButtonElement>(
-              "[data-rw-switch-row]",
-            ),
-          );
-          if (!items.length) return;
-          e.preventDefault();
-          const index = items.indexOf(
-            document.activeElement as HTMLButtonElement,
-          );
-          const next =
-            e.key === "Home"
-              ? 0
-              : e.key === "End"
-                ? items.length - 1
-                : e.key === "ArrowDown"
-                  ? (index + 1) % items.length
-                  : (index - 1 + items.length) % items.length;
-          items[next]?.focus();
-        }}
-      >
-        <div className="rw-switcher-head">
-          <div className="rw-switcher-search">
-            <Search size={14} aria-hidden="true" />
-            <input
-              autoFocus
-              aria-label="搜索主机"
-              placeholder="搜索主机、地址或用户名"
-              value={query}
-              onChange={(e) => onQuery(e.target.value)}
-            />
-            {query && (
-              <button
-                type="button"
-                aria-label="清除搜索"
-                onClick={() => onQuery("")}
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
-          <button
-            className="rw-icon"
-            aria-label="关闭服务器列表"
-            onClick={onClose}
-          >
-            <X size={15} />
-          </button>
-        </div>
-        <div className="rw-switcher-list">
-          {hosts.length === 0 ? (
-            <div className="rw-switcher-empty">
-              <Server size={22} />
-              <p>还没有服务器连接</p>
-              <span>新建一条 SSH 连接，文件、终端与 AI 共用它。</span>
-            </div>
-          ) : matched.length === 0 ? (
-            <div className="rw-switcher-empty">
-              <Search size={20} />
-              <p>没有匹配 “{query.trim()}” 的服务器</p>
-            </div>
-          ) : (
-            groups.map((group) => {
-              const items = matched.filter(
-                (h) => (h.group || "未分组") === group,
-              );
-              if (!items.length) return null;
-              const closed = normalized ? false : collapsed[group];
-              return (
-                <div className="rw-switcher-group" key={group}>
-                  <button
-                    className="rw-switcher-group-label"
-                    aria-expanded={!closed}
-                    onClick={() => onToggleGroup(group)}
-                  >
-                    {closed ? (
-                      <ChevronRight size={12} />
-                    ) : (
-                      <ChevronDown size={12} />
-                    )}
-                    <span>{group}</span>
-                    <small>{items.length}</small>
-                  </button>
-                  {!closed &&
-                    items.map((h) => {
-                      const state = stateOf(h.id);
-                      const current = h.id === currentHostId;
-                      return (
-                        <div
-                          className={
-                            "rw-switcher-row" + (current ? " active" : "")
-                          }
-                          key={h.id}
-                        >
-                          <button
-                            data-rw-switch-row=""
-                            className="rw-switcher-main"
-                            title={`切换到 ${h.name}`}
-                            onClick={() => onSelect(h)}
-                          >
-                            <span className="rw-switcher-host-icon">
-                              <Server size={15} />
-                              <i data-status={state} />
-                            </span>
-                            <span className="rw-switcher-host-text">
-                              <strong>{h.name}</strong>
-                              <small>
-                                {h.username}@{h.address}:{h.port}
-                              </small>
-                            </span>
-                          </button>
-                          {current ? (
-                            <span className="rw-switcher-tag">
-                              <Check size={11} />
-                              当前
-                            </span>
-                          ) : state === "connected" ? (
-                            <span className="rw-switcher-tag connected">
-                              已连接
-                            </span>
-                          ) : (
-                            <button
-                              data-rw-switch-row=""
-                              className="rw-switcher-connect"
-                              aria-label={`连接 ${h.name}`}
-                              title={`连接 ${h.name}`}
-                              onClick={() => onConnect(h)}
-                            >
-                              <PlugZap size={13} />
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                </div>
-              );
-            })
-          )}
-        </div>
-        <div className="rw-switcher-actions">
-          <button data-rw-switch-row="" onClick={onNew}>
-            <Plus size={14} />
-            新建连接
-          </button>
-          <button data-rw-switch-row="" onClick={onImport}>
-            <HardDrive size={14} />从 SSH Config 导入
-          </button>
-          {onEdit && (
-            <button data-rw-switch-row="" onClick={onEdit}>
-              <Settings2 size={14} />
-              编辑当前连接
-            </button>
-          )}
-          {onTunnel && (
-            <button data-rw-switch-row="" onClick={onTunnel}>
-              <Link2 size={14} />
-              端口隧道
-            </button>
-          )}
-        </div>
-        <div className="rw-switcher-note">
-          <span className="rw-status-dot" />
-          本机宿主 · v0.1.0
-          <span className="rw-switcher-hint">Esc 关闭</span>
-        </div>
-      </section>
-    </>
   );
 }
 
@@ -1754,59 +2033,58 @@ function ActionDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   return (
-    <div className="rw-modal-backdrop">
-      <form
-        className="rw-modal rw-action-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={dialog.title}
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setBusy(true);
-          try {
-            await dialog.action(value);
-            onClose();
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setBusy(false);
+    <Modal
+      form
+      ariaLabel={dialog.title}
+      className="rw-action-dialog"
+      busy={busy}
+      onClose={onClose}
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        try {
+          await dialog.action(value);
+          onClose();
+        } catch (e) {
+          setError((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <h2>{dialog.title}</h2>
+      {dialog.description && <p>{dialog.description}</p>}
+      {dialog.input && (
+        <input
+          autoFocus
+          type={dialog.password ? "password" : "text"}
+          required
+          value={value}
+          placeholder={dialog.placeholder}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      )}
+      {error && <div className="rw-error">{error}</div>}
+      <footer>
+        <button
+          type="button"
+          className="rw-button"
+          disabled={busy}
+          onClick={onClose}
+        >
+          取消
+        </button>
+        <button
+          type="submit"
+          className={
+            "rw-button " + (dialog.danger ? "destructive" : "primary")
           }
-        }}
-      >
-        <h2>{dialog.title}</h2>
-        {dialog.description && <p>{dialog.description}</p>}
-        {dialog.input && (
-          <input
-            autoFocus
-            type={dialog.password ? "password" : "text"}
-            required
-            value={value}
-            placeholder={dialog.placeholder}
-            onChange={(e) => setValue(e.target.value)}
-          />
-        )}{" "}
-        {error && <div className="rw-error">{error}</div>}
-        <footer>
-          <button
-            type="button"
-            className="rw-button"
-            disabled={busy}
-            onClick={onClose}
-          >
-            取消
-          </button>
-          <button
-            type="submit"
-            className={
-              "rw-button " + (dialog.danger ? "destructive" : "primary")
-            }
-            disabled={busy}
-          >
-            {busy ? "处理中…" : dialog.confirm}
-          </button>
-        </footer>
-      </form>
-    </div>
+          disabled={busy}
+        >
+          {busy ? "处理中…" : dialog.confirm}
+        </button>
+      </footer>
+    </Modal>
   );
 }
 function TunnelDialog({
@@ -1826,105 +2104,105 @@ function TunnelDialog({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   return (
-    <div className="rw-modal-backdrop">
-      <section
-        className="rw-modal rw-tunnel-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label="端口隧道"
-      >
-        <header>
-          <Link2 size={20} />
-          <h2>端口隧道</h2>
-          <button
-            className="rw-icon"
-            onClick={onClose}
-            aria-label="关闭端口隧道"
-          >
-            <X size={17} />
-          </button>
-        </header>
-        <p>通过 {host.name} 访问内网服务。监听地址为 DSH 宿主的 127.0.0.1。</p>
-        {snapshot.tunnels
-          .filter((t) => t.hostId === host.id)
-          .map((t) => (
-            <div className="rw-tunnel-row" key={t.id}>
-              <span>
-                :{t.localPort} <ArrowRight size={12} /> {t.targetHost}:
-                {t.targetPort}
-              </span>
-              <button
-                onClick={() => {
-                  void api
-                    .post("/tunnels/close", { id: t.id })
-                    .then(onChange)
-                    .catch((e) => setError(e.message));
-                }}
-              >
-                停止
-              </button>
-            </div>
-          ))}
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setBusy(true);
-            setError("");
-            try {
-              await api.post("/tunnels/create", {
-                hostId: host.id,
-                localPort: local,
-                targetHost: target,
-                targetPort: port,
-              });
-              await onChange();
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
-          }}
+    <Modal
+      ariaLabel="端口隧道"
+      className="rw-tunnel-dialog"
+      busy={busy}
+      onClose={onClose}
+    >
+      <header>
+        <Link2 size={20} />
+        <h2>端口隧道</h2>
+        <button
+          type="button"
+          className="rw-icon"
+          onClick={onClose}
+          aria-label="关闭端口隧道"
         >
-          <div className="rw-form-row">
-            <label>
-              本机端口
-              <input
-                type="number"
-                min="1024"
-                max="65535"
-                required
-                value={local}
-                onChange={(e) => setLocal(Number(e.target.value))}
-              />
-            </label>
-            <label>
-              远程目标
-              <input
-                required
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-              />
-            </label>
-            <label>
-              目标端口
-              <input
-                type="number"
-                min="1"
-                max="65535"
-                required
-                value={port}
-                onChange={(e) => setPort(Number(e.target.value))}
-              />
-            </label>
-          </div>
-          {error && <div className="rw-error">{error}</div>}
-          <footer>
-            <button className="rw-button primary" disabled={busy}>
-              {busy ? "创建中…" : "创建隧道"}
+          <X size={17} />
+        </button>
+      </header>
+      <p>通过 {host.name} 访问内网服务。监听地址为 DSH 宿主的 127.0.0.1。</p>
+      {snapshot.tunnels
+        .filter((t) => t.hostId === host.id)
+        .map((t) => (
+          <div className="rw-tunnel-row" key={t.id}>
+            <span>
+              :{t.localPort} <ArrowRight size={12} /> {t.targetHost}:
+              {t.targetPort}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                void api
+                  .post("/tunnels/close", { id: t.id })
+                  .then(onChange)
+                  .catch((e) => setError(e.message));
+              }}
+            >
+              停止
             </button>
-          </footer>
-        </form>
-      </section>
-    </div>
+          </div>
+        ))}
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError("");
+          try {
+            await api.post("/tunnels/create", {
+              hostId: host.id,
+              localPort: local,
+              targetHost: target,
+              targetPort: port,
+            });
+            await onChange();
+          } catch (e) {
+            setError((e as Error).message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <div className="rw-form-row">
+          <label>
+            本机端口
+            <input
+              type="number"
+              min="1024"
+              max="65535"
+              required
+              value={local}
+              onChange={(e) => setLocal(Number(e.target.value))}
+            />
+          </label>
+          <label>
+            远程目标
+            <input
+              required
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+          </label>
+          <label>
+            目标端口
+            <input
+              type="number"
+              min="1"
+              max="65535"
+              required
+              value={port}
+              onChange={(e) => setPort(Number(e.target.value))}
+            />
+          </label>
+        </div>
+        {error && <div className="rw-error">{error}</div>}
+        <footer>
+          <button className="rw-button primary" disabled={busy}>
+            {busy ? "创建中…" : "创建隧道"}
+          </button>
+        </footer>
+      </form>
+    </Modal>
   );
 }

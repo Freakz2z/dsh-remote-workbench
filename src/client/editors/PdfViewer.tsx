@@ -2,18 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
-  Download,
   LoaderCircle,
+  MessageSquarePlus,
   RotateCcw,
   RotateCw,
   Save,
   TextCursorInput,
   Trash2,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import workerSource from "pdfjs-dist/build/pdf.worker.min.mjs?raw";
 import { API_PREFIX } from "../../shared/types.ts";
-import { api, ApiError, downloadUrl } from "../api.ts";
+import { api, ApiError } from "../api.ts";
 
 export interface PdfAnnotation {
   id: string;
@@ -144,11 +146,24 @@ export function PdfViewer({
   const [fields, setFields] = useState<FormField[]>([]);
   const [saving, setSaving] = useState(false);
   const [size, setSize] = useState<{ width: number; height: number }>();
-  const [composer, setComposer] = useState<{ x: number; y: number }>();
+  const [annotateMode, setAnnotateMode] = useState(false);
+  const [composer, setComposer] = useState<{
+    x: number;
+    y: number;
+    editingId?: string;
+  }>();
   const [composerText, setComposerText] = useState("");
   const [showForms, setShowForms] = useState(false);
   const [tick, setTick] = useState(0);
   const page = draft.page;
+
+  const stepZoom = (delta: number) => {
+    const current = draft.fitWidth ? 1 : draft.zoom;
+    const idx = ZOOMS.findIndex((z) => z >= current);
+    const base = idx === -1 ? ZOOMS.length - 1 : idx;
+    const next = ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, base + delta))]!;
+    setDraft({ fitWidth: false, zoom: next });
+  };
 
   const setDraft = (patch: Partial<PdfDraft>) =>
     onDraft({ ...draft, ...patch });
@@ -462,8 +477,16 @@ export function PdfViewer({
             <ChevronRight size={14} />
           </button>
         </div>
-        <label className="rw-pdf-zoom">
-          缩放
+        <div className="rw-pdf-zoom">
+          <button
+            type="button"
+            className="rw-icon"
+            aria-label="缩小"
+            title="缩小"
+            onClick={() => stepZoom(-1)}
+          >
+            <ZoomOut size={13} />
+          </button>
           <select
             aria-label="PDF 缩放"
             value={draft.fitWidth ? "fit" : String(draft.zoom)}
@@ -480,8 +503,32 @@ export function PdfViewer({
               </option>
             ))}
           </select>
-        </label>
+          <button
+            type="button"
+            className="rw-icon"
+            aria-label="放大"
+            title="放大"
+            onClick={() => stepZoom(1)}
+          >
+            <ZoomIn size={13} />
+          </button>
+        </div>
         <button
+          type="button"
+          className={"rw-button" + (annotateMode ? " active" : "")}
+          aria-pressed={annotateMode}
+          aria-label="批注模式"
+          title={annotateMode ? "退出批注模式" : "开启批注模式：点击页面添加文字批注"}
+          onClick={() => {
+            setAnnotateMode((v) => !v);
+            setComposer(undefined);
+          }}
+        >
+          <MessageSquarePlus size={13} />
+          批注
+        </button>
+        <button
+          type="button"
           className="rw-icon"
           aria-label="逆时针旋转"
           title="整份 PDF 逆时针旋转 90°（保存时写入）"
@@ -490,6 +537,7 @@ export function PdfViewer({
           <RotateCcw size={14} />
         </button>
         <button
+          type="button"
           className="rw-icon"
           aria-label="顺时针旋转"
           title="整份 PDF 顺时针旋转 90°（保存时写入）"
@@ -498,6 +546,7 @@ export function PdfViewer({
           <RotateCw size={14} />
         </button>
         <button
+          type="button"
           className={"rw-button" + (showForms ? " active" : "")}
           aria-pressed={showForms}
           aria-label="表单字段"
@@ -507,16 +556,7 @@ export function PdfViewer({
           表单 {fields.length}
         </button>
         <button
-          className="rw-icon"
-          aria-label="下载 PDF"
-          title="下载原文件"
-          onClick={() =>
-            window.open(downloadUrl(hostId, path, hostRevision), "_blank")
-          }
-        >
-          <Download size={14} />
-        </button>
-        <button
+          type="button"
           className="rw-button primary"
           aria-label="保存 PDF"
           disabled={!dirty || saving}
@@ -545,7 +585,7 @@ export function PdfViewer({
               size ? { width: size.width, height: size.height } : undefined
             }
             onMouseDown={(e) => {
-              if (e.target !== canvas.current) return;
+              if (!annotateMode || e.target !== canvas.current) return;
               const rect = (
                 e.target as HTMLCanvasElement
               ).getBoundingClientRect();
@@ -559,7 +599,10 @@ export function PdfViewer({
               setComposerText("");
             }}
           >
-            <canvas ref={canvas} className="rw-pdf-canvas" />
+            <canvas
+              ref={canvas}
+              className={"rw-pdf-canvas" + (annotateMode ? " annotating" : "")}
+            />
             {composer &&
               size &&
               viewportRef.current &&
@@ -568,26 +611,39 @@ export function PdfViewer({
                   composer.x,
                   composer.y,
                 );
+                const left = Math.max(8, Math.min(vx, Math.max(8, size.width - 230)));
+                const top = Math.max(36, vy);
                 return (
                   <form
                     className="rw-pdf-annotation-draft"
-                    style={{ left: vx, top: vy }}
+                    style={{ left, top }}
                     onSubmit={(e) => {
                       e.preventDefault();
-                      if (!composerText.trim()) return;
-                      setDraft({
-                        annotations: [
-                          ...draft.annotations,
-                          {
-                            id: crypto.randomUUID(),
-                            page,
-                            x: composer.x,
-                            y: composer.y,
-                            text: composerText.trim(),
-                            fontSize: 12,
-                          },
-                        ],
-                      });
+                      const text = composerText.trim();
+                      if (!text) return;
+                      if (composer.editingId) {
+                        setDraft({
+                          annotations: draft.annotations.map((item) =>
+                            item.id === composer.editingId
+                              ? { ...item, text }
+                              : item,
+                          ),
+                        });
+                      } else {
+                        setDraft({
+                          annotations: [
+                            ...draft.annotations,
+                            {
+                              id: crypto.randomUUID(),
+                              page,
+                              x: composer.x,
+                              y: composer.y,
+                              text,
+                              fontSize: 12,
+                            },
+                          ],
+                        });
+                      }
                       setComposer(undefined);
                       setComposerText("");
                     }}
@@ -602,7 +658,9 @@ export function PdfViewer({
                         if (e.key === "Escape") setComposer(undefined);
                       }}
                     />
-                    <button type="submit">添加</button>
+                    <button type="submit">
+                      {composer.editingId ? "更新" : "添加"}
+                    </button>
                     <button
                       type="button"
                       aria-label="取消批注"
@@ -628,7 +686,16 @@ export function PdfViewer({
                       key={item.id}
                       className="rw-pdf-annotation"
                       style={{ left: vx, top: vy }}
-                      title={item.text}
+                      title={`${item.text}（点击编辑）`}
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest("button")) return;
+                        setComposer({
+                          x: item.x,
+                          y: item.y,
+                          editingId: item.id,
+                        });
+                        setComposerText(item.text);
+                      }}
                     >
                       {item.text}
                       <button
@@ -654,6 +721,14 @@ export function PdfViewer({
           <header>
             <strong>表单字段</strong>
             <span>{fields.length} 个</span>
+            <button
+              type="button"
+              className="rw-icon"
+              aria-label="关闭表单面板"
+              onClick={() => setShowForms(false)}
+            >
+              <X size={13} />
+            </button>
           </header>
           {fields.length ? (
             <div className="rw-pdf-forms-list">
@@ -723,7 +798,8 @@ export function PdfViewer({
       )}
       <footer className="rw-pdf-footer">
         <span>
-          {name} · 点击页面添加文字批注
+          {name} ·{" "}
+          {annotateMode ? "批注模式：点击页面添加批注" : "浏览模式"}
           {dirty ? " · 有未保存修改" : ""}
         </span>
         {draft.annotations.length > 0 && (
@@ -737,9 +813,15 @@ export function PdfViewer({
           </button>
         )}
         {draft.rotateBy !== 0 && (
-          <span className="rw-pdf-rotate">
+          <button
+            type="button"
+            className="rw-pdf-rotate"
+            title="重置旋转角度"
+            onClick={() => setDraft({ rotateBy: 0 })}
+          >
             旋转 {((draft.rotateBy % 360) + 360) % 360}°
-          </span>
+            <X size={11} />
+          </button>
         )}
       </footer>
     </div>

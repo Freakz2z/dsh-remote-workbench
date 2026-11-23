@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   X,
   KeyRound,
   LockKeyhole,
   Fingerprint,
   Server,
-  ChevronDown,
 } from "lucide-react";
 import type { Credentials, Host, HostInput } from "../shared/types.ts";
+import { Modal } from "./components/Modal.tsx";
+
+const PRESET_GROUPS = ["开发环境", "测试环境", "预发环境", "生产环境"];
 
 export function HostDialog({
   host,
@@ -25,6 +27,11 @@ export function HostDialog({
   /** Remove the durable credential record for this host. */
   onForgetCredentials?: () => Promise<void>;
 }) {
+  const isEditing = Boolean(host?.id);
+  const initialAuth =
+    !isEditing && (!host?.auth || host.auth === "agent")
+      ? "key"
+      : (host?.auth ?? "key");
   const [form, setForm] = useState<HostInput>({
     name: "",
     address: "",
@@ -32,38 +39,38 @@ export function HostDialog({
     username: "root",
     group: "开发环境",
     rootPath: "/",
-    auth: "agent",
     favorite: false,
     ...host,
+    auth: initialAuth,
   });
   const [password, setPassword] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const groupSuggestions = useMemo(
+    () =>
+      [...new Set([...PRESET_GROUPS, ...hosts.map((h) => h.group).filter(Boolean)])],
+    [hosts],
+  );
   const set = <K extends keyof HostInput>(key: K, value: HostInput[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
   return (
-    <div
-      className="rw-modal-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
+    <Modal
+      ariaLabel={isEditing ? "编辑连接" : "新建连接"}
+      className="rw-host-dialog"
+      busy={busy}
+      onClose={onClose}
     >
-      <section
-        className="rw-modal rw-host-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={host ? "编辑连接" : "新建连接"}
-      >
         <header>
           <div className="rw-modal-icon">
             <Server size={21} />
           </div>
           <div>
-            <h2>{host ? "编辑连接" : "连接一台服务器"}</h2>
-            <p>配置一次，文件、终端与 AI 共用这条连接</p>
+            <h2>{isEditing ? "编辑连接" : "连接一台服务器"}</h2>
+            <p>配置一次，文件、终端与 Agent 共用这条连接</p>
           </div>
           <button
+            type="button"
             className="rw-icon"
             aria-label="关闭"
             disabled={busy}
@@ -139,9 +146,15 @@ export function HostDialog({
             <label className="rw-grow">
               分组
               <input
+                list="rw-host-groups"
                 value={form.group}
                 onChange={(e) => set("group", e.target.value)}
               />
+              <datalist id="rw-host-groups">
+                {groupSuggestions.map((g) => (
+                  <option key={g} value={g} />
+                ))}
+              </datalist>
             </label>
           </div>
           <label>认证方式</label>
@@ -152,7 +165,7 @@ export function HostDialog({
                 { id: "password", icon: LockKeyhole, label: "密码" },
                 // Legacy rows that already use SSH Agent keep their option so an
                 // existing connection never changes silently; new ones cannot pick it.
-                ...(form.auth === "agent"
+                ...(isEditing && form.auth === "agent"
                   ? [
                       {
                         id: "agent" as const,
@@ -242,49 +255,52 @@ export function HostDialog({
           </label>
           {error && <div className="rw-error">{error}</div>}
           <footer>
-            {onDelete ? (
+            <div className="rw-modal-footer-left">
+              {onDelete ? (
+                <button
+                  type="button"
+                  className="rw-delete-connection"
+                  disabled={busy}
+                  onClick={onDelete}
+                >
+                  删除连接
+                </button>
+              ) : (
+                <span>凭据安全保存在 DSH 凭据库</span>
+              )}
+              {onForgetCredentials && (
+                <button
+                  type="button"
+                  className="rw-forget-credentials"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await onForgetCredentials();
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  忘记已保存凭据
+                </button>
+              )}
+            </div>
+            <div className="rw-modal-footer-right">
               <button
                 type="button"
-                className="rw-delete-connection"
+                className="rw-button"
                 disabled={busy}
-                onClick={onDelete}
+                onClick={onClose}
               >
-                删除连接
+                取消
               </button>
-            ) : (
-              <span>凭据保存在 DSH 凭据库</span>
-            )}
-            {onForgetCredentials && (
-              <button
-                type="button"
-                className="rw-forget-credentials"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await onForgetCredentials();
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                忘记已保存凭据
+              <button type="submit" className="rw-button primary" disabled={busy}>
+                {busy ? "正在保存…" : "保存连接"}
               </button>
-            )}
-            <button
-              type="button"
-              className="rw-button"
-              disabled={busy}
-              onClick={onClose}
-            >
-              取消
-            </button>
-            <button type="submit" className="rw-button primary" disabled={busy}>
-              {busy ? "正在保存…" : "保存连接"}
-            </button>
+            </div>
           </footer>
         </form>
-      </section>
-    </div>
+    </Modal>
   );
 }

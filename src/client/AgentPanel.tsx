@@ -5,9 +5,9 @@ import {
   Files,
   LoaderCircle,
   PlugZap,
-  Search,
   Send,
   Server,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Unplug,
@@ -20,13 +20,20 @@ import type {
   Credentials,
   ConnectionState,
   Host,
+  HostInput,
   Snapshot,
+  Grant,
 } from "../shared/types.ts";
-import type { Grant } from "../shared/types.ts";
 import { MonitorView } from "./MonitorView.tsx";
 import { AgentFiles } from "./AgentFiles.tsx";
 import { HostDialog } from "./HostDialog.tsx";
-import type { HostInput } from "../shared/types.ts";
+import { ConfirmDialog, Modal } from "./components/Modal.tsx";
+import { HostSwitcher } from "./components/HostSwitcher.tsx";
+import {
+  SshImportDialog,
+  type SshImportCandidate,
+} from "./components/SshImportDialog.tsx";
+import "./style.css";
 
 interface NavigationParams {
   hostId?: string;
@@ -109,7 +116,6 @@ function AgentPanelBody({
   const [hostId, setHostId] = useState(() => remembered("agent-host"));
   const [mode, setMode] = useState<"files" | "monitor">("files");
   const [switcher, setSwitcher] = useState(false);
-  const [query, setQuery] = useState("");
   const [busyHost, setBusyHost] = useState("");
   const [notice, setNotice] = useState<{ text: string; error: boolean }>();
   const [trust, setTrust] = useState<{
@@ -130,7 +136,17 @@ function AgentPanelBody({
   const [hostDialog, setHostDialog] = useState<{
     host?: Host | Partial<HostInput>;
   }>();
+  const [sshImport, setSshImport] = useState<{
+    hosts: SshImportCandidate[];
+    skipped: string[];
+  }>();
+  const [confirmSwitch, setConfirmSwitch] = useState<{
+    hostId: string;
+    openRequest?: OpenFileRequest;
+  }>();
+  const [confirmDelete, setConfirmDelete] = useState<Host | Partial<HostInput>>();
   const [importing, setImporting] = useState(false);
+  const switchButtonRef = useRef<HTMLButtonElement>(null);
 
   const host = snapshot.hosts.find((item) => item.id === hostId);
   const connection: ConnectionState | undefined = snapshot.connections.find(
@@ -194,13 +210,10 @@ function AgentPanelBody({
   useEffect(() => {
     if (!openRequest?.path || !openRequest.hostId) return;
     if (openRequest.hostId !== hostId) {
-      if (
-        filesDirty &&
-        !window.confirm(
-          "当前打开的文件还有未保存的修改。切换服务器会关闭这些标签，继续？",
-        )
-      )
+      if (filesDirty) {
+        setConfirmSwitch({ hostId: openRequest.hostId, openRequest });
         return;
+      }
       setFilesDirty(false);
       setHostId(openRequest.hostId);
     }
@@ -209,22 +222,25 @@ function AgentPanelBody({
     // The nonce changes on every navigation, so reopening the same file works.
   }, [openRequest?.nonce, openRequest?.hostId, openRequest?.path]);
 
+  const closeSwitcher = () => {
+    setSwitcher(false);
+    switchButtonRef.current?.focus();
+  };
+
   /** Switching servers closes the open tabs, so unsaved work asks first. */
   const chooseHost = (id: string) => {
     if (id === hostId) {
-      setSwitcher(false);
+      closeSwitcher();
       return;
     }
-    if (
-      filesDirty &&
-      !window.confirm(
-        "当前打开的文件还有未保存的修改（含 PDF 批注/表单）。切换服务器会关闭这些标签，继续？",
-      )
-    )
+    if (filesDirty) {
+      setSwitcher(false);
+      setConfirmSwitch({ hostId: id });
       return;
+    }
     setFilesDirty(false);
     setHostId(id);
-    setSwitcher(false);
+    closeSwitcher();
   };
 
   const saveHost = async (input: HostInput, credentials: Credentials) => {
@@ -240,14 +256,30 @@ function AgentPanelBody({
     setImporting(true);
     try {
       const value = await api.post<{
-        hosts: (Partial<HostInput> & { note?: string })[];
+        hosts: SshImportCandidate[];
+        skipped?: string[];
       }>("/ssh/import", {});
       if (!value.hosts.length) {
         toast("没有找到可导入的明确 Host 配置", true);
         return;
       }
-      setHostDialog({ host: value.hosts[0] });
-      toast(`发现 ${value.hosts.length} 个配置，先预览第一个`);
+      if (value.hosts.length === 1) {
+        const first = value.hosts[0]!;
+        setHostDialog({
+          host: {
+            ...first,
+            auth:
+              first.auth === "agent" || !first.auth
+                ? first.privateKeyPath
+                  ? "key"
+                  : "password"
+                : first.auth,
+          },
+        });
+        toast("已读取 1 个 SSH 配置，确认后保存");
+      } else {
+        setSshImport({ hosts: value.hosts, skipped: value.skipped ?? [] });
+      }
     } catch (error) {
       toast((error as Error).message, true);
     } finally {
@@ -353,27 +385,30 @@ function AgentPanelBody({
     setHandoff({ text, label });
   };
 
-  const hosts = snapshot.hosts.filter((item) =>
-    `${item.name} ${item.address} ${item.username}`
-      .toLowerCase()
-      .includes(query.trim().toLowerCase()),
-  );
-  const groups = [
-    ...new Set(snapshot.hosts.map((item) => item.group || "未分组")),
-  ];
+  const grantLabel = !grant
+    ? "授权"
+    : grant.exec
+      ? grant.write
+        ? "读·写·Shell"
+        : "读·Shell"
+      : grant.write
+        ? "读·写"
+        : "只读";
+  const grantTitle = grant
+    ? `已授权${grant.write ? "读取与写入" : "读取"} ${grant.rootPath}（${grant.exec ? "已允许工具级 Shell 执行" : "Shell 未开启"}）`
+    : "授权当前会话读取此服务器，Agent 即可用已保存凭据连接";
 
   return (
     <div className="rw-workbench rw-agent">
       <div className="rw-agent-bar">
         <div className="rw-agent-host">
           <button
+            ref={switchButtonRef}
             className="rw-agent-host-button"
             aria-haspopup="dialog"
             aria-expanded={switcher}
-            onClick={() => {
-              setSwitcher((value) => !value);
-              setQuery("");
-            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => setSwitcher((value) => !value)}
           >
             <Server size={13} />
             <span title={host?.name}>{host?.name ?? "选择服务器"}</span>
@@ -390,6 +425,11 @@ function AgentPanelBody({
             )}
             <ChevronDown size={12} />
           </button>
+          {host?.group?.includes("生产") && (
+            <span className="rw-env production rw-agent-env" title="生产环境主机">
+              生产
+            </span>
+          )}
           {host &&
             (connected ? (
               <button
@@ -424,7 +464,7 @@ function AgentPanelBody({
             onClick={() => setMode("files")}
           >
             <Files size={13} />
-            文件
+            <span>文件</span>
           </button>
           <button
             role="tab"
@@ -433,20 +473,20 @@ function AgentPanelBody({
             onClick={() => setMode("monitor")}
           >
             <Activity size={13} />
-            监控
+            <span>监控</span>
           </button>
         </div>
         <div className="rw-agent-perm">
           {sessionId ? (
             <button
-              className={"rw-agent-granted" + (grant ? " on" : "")}
+              className={
+                "rw-agent-granted" +
+                (grant ? " on" : "") +
+                (grant?.exec ? " exec" : "")
+              }
               aria-label={grant ? "管理当前会话授权" : "授权当前会话读取"}
               aria-haspopup="dialog"
-              title={
-                grant
-                  ? `已授权${grant.write ? "读取与写入" : "读取"} ${grant.rootPath}（Shell 未开启）`
-                  : "授权当前会话读取此服务器，Agent 即可用已保存凭据连接（不开启 Shell）"
-              }
+              title={grantTitle}
               disabled={!host}
               onClick={() => {
                 setGrantWrite(!!grant?.write);
@@ -454,8 +494,12 @@ function AgentPanelBody({
                 setGrantOpen(true);
               }}
             >
-              <ShieldCheck size={12} />
-              {grant ? (grant.write ? "读+写" : "已授权") : ""}
+              {grant?.exec ? (
+                <ShieldAlert size={12} />
+              ) : (
+                <ShieldCheck size={12} />
+              )}
+              <span>{grantLabel}</span>
             </button>
           ) : (
             <span className="rw-agent-nosession" title="未绑定会话">
@@ -464,101 +508,39 @@ function AgentPanelBody({
           )}
         </div>
         {switcher && (
-          <>
-            <div
-              className="rw-agent-scrim"
-              onClick={() => setSwitcher(false)}
-            />
-            <div
-              className="rw-agent-switcher"
-              role="dialog"
-              aria-label="选择服务器"
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              <div className="rw-agent-switcher-search">
-                <Search size={13} />
-                <input
-                  autoFocus
-                  aria-label="搜索主机"
-                  placeholder="搜索服务器"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setSwitcher(false);
-                  }}
-                />
-              </div>
-              <div className="rw-agent-switcher-list">
-                {hosts.length ? (
-                  hosts.map((item) => {
-                    const status = snapshot.connections.find(
-                      (state) => state.hostId === item.id,
-                    )?.status;
-                    return (
-                      <button
-                        key={item.id}
-                        aria-current={item.id === hostId}
-                        className={item.id === hostId ? "active" : ""}
-                        onClick={() => chooseHost(item.id)}
-                      >
-                        <Server size={13} />
-                        <span>
-                          <strong>{item.name}</strong>
-                          <small>
-                            {item.username}@{item.address}:{item.port}
-                          </small>
-                        </span>
-                        <i
-                          className={
-                            status === "connected"
-                              ? "on"
-                              : status === "connecting"
-                                ? "connecting"
-                                : ""
-                          }
-                        />
-                      </button>
-                    );
-                  })
-                ) : (
-                  <p className="rw-agent-switcher-empty">
-                    {loaded
-                      ? "还没有服务器，请先在工作台新建连接。"
-                      : "正在读取…"}
-                  </p>
-                )}
-              </div>
-              <footer>
-                <button
-                  className="rw-agent-switch-action"
-                  onClick={() => {
-                    setSwitcher(false);
-                    setHostDialog({});
-                  }}
-                >
-                  + 新建连接
-                </button>
-                <button
-                  className="rw-agent-switch-action"
-                  disabled={importing}
-                  onClick={() => void importSsh()}
-                >
-                  从 SSH Config 导入
-                </button>
-                {host && (
-                  <button
-                    className="rw-agent-switch-action"
-                    onClick={() => {
-                      setSwitcher(false);
-                      setHostDialog({ host });
-                    }}
-                  >
-                    编辑当前连接
-                  </button>
-                )}
-              </footer>
-            </div>
-          </>
+          <HostSwitcher
+            compact
+            id="rw-agent-switcher"
+            ariaLabel="选择服务器"
+            hosts={snapshot.hosts}
+            connections={snapshot.connections}
+            currentHostId={hostId}
+            importing={importing}
+            onSelect={(value) => chooseHost(value.id)}
+            onConnect={(value) => {
+              closeSwitcher();
+              setHostId(value.id);
+              void connect(value.id);
+            }}
+            onNew={() => {
+              closeSwitcher();
+              setHostDialog({});
+            }}
+            onImport={() => void importSsh()}
+            onEditHost={(target) => {
+              closeSwitcher();
+              setHostDialog({ host: target });
+            }}
+            onEditCurrent={
+              host
+                ? () => {
+                    closeSwitcher();
+                    setHostDialog({ host });
+                  }
+                : undefined
+            }
+            onClose={closeSwitcher}
+          />
         )}
       </div>
       <div className="rw-agent-body">
@@ -568,7 +550,7 @@ function AgentPanelBody({
             <h2>还没有可用的服务器</h2>
             <p>
               直接在这里新建 SSH
-              连接：首次连接会核对指纹，密码只保存在宿主内存中。
+              连接：首次连接会核对指纹，凭据安全保存在 DSH 凭据库中。
             </p>
             <div className="rw-agent-state-actions">
               <button
@@ -599,6 +581,8 @@ function AgentPanelBody({
                 host={host}
                 sessionId={sessionId}
                 connected={connected}
+                connecting={busyHost === host.id}
+                onConnect={() => void connect(host.id)}
                 request={
                   fileRequest?.hostId === host.id &&
                   fileRequest.path &&
@@ -624,6 +608,8 @@ function AgentPanelBody({
                 hostId={host.id}
                 hostName={host.name}
                 connected={connected}
+                connecting={busyHost === host.id}
+                onConnect={() => void connect(host.id)}
                 active={mode === "monitor" && visible}
                 onSummary={(text) => openHandoff(text, "监控摘要")}
                 onNotice={toast}
@@ -644,119 +630,121 @@ function AgentPanelBody({
         </div>
       )}
       {grantOpen && host && (
-        <div className="rw-modal-backdrop">
-          <section
-            className="rw-modal rw-agent-grant"
-            role="dialog"
-            aria-modal="true"
-            aria-label="授权当前会话"
-          >
-            <h2>{grant ? "当前会话的授权" : "授权当前 DSH 会话"}</h2>
-            <p>
-              {host.name} · {host.rootPath}
-              {"\n"}授权后 Agent
-              可以在当前会话里直接连接这台服务器（使用已保存的凭据），
-              并把监控摘要与文件交给 AI 分析。
-            </p>
-            <label className="rw-agent-grant-check">
-              <input
-                type="checkbox"
-                checked={grantWrite}
-                onChange={(e) => setGrantWrite(e.target.checked)}
-              />
-              允许修改此目录下的远程文件（写入）
-            </label>
-            <label className="rw-agent-grant-check">
-              <input
-                type="checkbox"
-                checked={grantExec}
-                onChange={(e) => setGrantExec(e.target.checked)}
-              />
-              允许工具级 Shell 执行（不会在工作台或右栏生成终端）
-            </label>
-            <footer>
-              {grant && (
-                <button
-                  className="rw-button destructive"
-                  onClick={() => void revokeGrant()}
-                >
-                  撤销授权
-                </button>
-              )}
-              <button className="rw-button" onClick={() => setGrantOpen(false)}>
-                取消
-              </button>
+        <Modal
+          ariaLabel="授权当前会话"
+          className="rw-agent-grant"
+          onClose={() => setGrantOpen(false)}
+        >
+          <h2>{grant ? "当前会话的授权" : "授权当前 DSH 会话"}</h2>
+          <p>
+            {host.name} · {host.rootPath}
+            {"\n"}授权后 Agent 可以在当前会话里直接连接这台服务器（使用已保存的凭据），并读取监控摘要与文件。
+          </p>
+          <label className="rw-agent-grant-check">
+            <input
+              type="checkbox"
+              checked={grantWrite}
+              onChange={(e) => setGrantWrite(e.target.checked)}
+            />
+            允许修改此目录下的远程文件（写入）
+          </label>
+          <label className="rw-agent-grant-check warn">
+            <input
+              type="checkbox"
+              checked={grantExec}
+              onChange={(e) => setGrantExec(e.target.checked)}
+            />
+            允许工具级 Shell 执行（高权限，不会在界面生成终端）
+          </label>
+          <footer>
+            {grant && (
               <button
-                className="rw-button primary"
-                onClick={() => void applyGrant(grantWrite, grantExec)}
-                disabled={!sessionId}
+                type="button"
+                className="rw-button destructive"
+                onClick={() => void revokeGrant()}
               >
-                {grant
-                  ? "更新授权"
-                  : grantWrite
-                    ? "允许读取与写入"
-                    : "允许读取"}
+                撤销授权
               </button>
-            </footer>
-          </section>
-        </div>
+            )}
+            <button
+              type="button"
+              className="rw-button"
+              onClick={() => setGrantOpen(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="rw-button primary"
+              onClick={() => void applyGrant(grantWrite, grantExec)}
+              disabled={!sessionId}
+            >
+              {grant
+                ? "更新授权"
+                : grantWrite
+                  ? "允许读取与写入"
+                  : "允许读取"}
+            </button>
+          </footer>
+        </Modal>
       )}
       {handoff && (
-        <div className="rw-modal-backdrop">
-          <section
-            className="rw-modal rw-agent-handoff"
-            role="dialog"
-            aria-modal="true"
-            aria-label="交给当前 Agent"
-          >
-            <header>
-              <Sparkles size={16} />
-              <h2>交给当前 Agent</h2>
-              <button
-                className="rw-icon"
-                aria-label="关闭"
-                onClick={() => setHandoff(undefined)}
-              >
-                <X size={14} />
-              </button>
-            </header>
-            <p>
-              目标会话：{sessionId ? sessionId.slice(0, 8) : "未绑定"}
-              {host ? ` · ${host.name}` : ""} · 内容：{handoff.label}
-            </p>
-            <textarea
-              aria-label="交给 Agent 的内容"
-              value={handoff.text}
-              onChange={(e) => setHandoff({ ...handoff, text: e.target.value })}
-            />
-            <footer>
-              <button
-                className="rw-button"
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(handoff.text)
-                    .then(() => toast("内容已复制"))
-                    .catch((error: Error) => toast(error.message, true));
-                }}
-              >
-                <Copy size={13} />
-                复制
-              </button>
-              <button
-                className="rw-button primary"
-                disabled={!sessionId || sending}
-                onClick={() => void sendToAgent()}
-              >
-                {sending ? (
-                  <LoaderCircle size={13} className="rw-spin" />
-                ) : (
-                  <Send size={13} />
-                )}
-                发送到当前会话
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          ariaLabel="交给当前 Agent"
+          className="rw-agent-handoff"
+          busy={sending}
+          onClose={() => setHandoff(undefined)}
+        >
+          <header>
+            <Sparkles size={16} />
+            <h2>交给当前 Agent</h2>
+            <button
+              type="button"
+              className="rw-icon"
+              aria-label="关闭"
+              onClick={() => setHandoff(undefined)}
+            >
+              <X size={14} />
+            </button>
+          </header>
+          <p>
+            目标会话：{sessionId ? sessionId.slice(0, 8) : "未绑定"}
+            {host ? ` · ${host.name}` : ""} · 内容：{handoff.label}
+          </p>
+          <textarea
+            aria-label="交给 Agent 的内容"
+            value={handoff.text}
+            onChange={(e) => setHandoff({ ...handoff, text: e.target.value })}
+          />
+          <footer>
+            <button
+              type="button"
+              className="rw-button"
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(handoff.text)
+                  .then(() => toast("内容已复制"))
+                  .catch((error: Error) => toast(error.message, true));
+              }}
+            >
+              <Copy size={13} />
+              复制
+            </button>
+            <button
+              type="button"
+              className="rw-button primary"
+              disabled={!sessionId || sending}
+              onClick={() => void sendToAgent()}
+            >
+              {sending ? (
+                <LoaderCircle size={13} className="rw-spin" />
+              ) : (
+                <Send size={13} />
+              )}
+              发送到当前会话
+            </button>
+          </footer>
+        </Modal>
       )}
       {hostDialog && (
         <HostDialog
@@ -782,111 +770,159 @@ function AgentPanelBody({
             hostDialog.host?.id
               ? () => {
                   const target = hostDialog.host!;
-                  const name = target.name ?? "这台连接";
                   setHostDialog(undefined);
-                  if (
-                    !window.confirm(
-                      `删除连接“${name}”？该连接的终端与隧道会一并关闭。`,
-                    )
-                  )
-                    return;
-                  void (async () => {
-                    try {
-                      await api.post("/hosts/delete", { hostId: target.id });
-                      const next = await refresh();
-                      if (target.id === hostId) {
-                        setFilesDirty(false);
-                        setHostId(next.hosts[0]?.id ?? "");
-                      }
-                      toast("连接已删除");
-                    } catch (error) {
-                      toast((error as Error).message, true);
-                    }
-                  })();
+                  setConfirmDelete(target);
                 }
               : undefined
           }
         />
       )}
+      {sshImport && (
+        <SshImportDialog
+          hosts={sshImport.hosts}
+          skipped={sshImport.skipped}
+          onClose={() => setSshImport(undefined)}
+          onImportSelected={async (items) => {
+            let firstId = "";
+            for (const item of items) {
+              const saved = await api.post<Host>("/hosts/save", item);
+              if (!firstId) firstId = saved.id;
+            }
+            await refresh();
+            if (firstId) setHostId(firstId);
+            toast(`已导入 ${items.length} 个主机配置`);
+          }}
+          onEditOne={(candidate) => {
+            setSshImport(undefined);
+            setHostDialog({ host: candidate });
+          }}
+        />
+      )}
+      {confirmSwitch && (
+        <ConfirmDialog
+          title="切换服务器？"
+          description="当前打开的文件还有未保存的修改（含 PDF 批注/表单）。切换服务器会关闭这些标签，继续？"
+          confirm="放弃修改并切换"
+          danger
+          onClose={() => setConfirmSwitch(undefined)}
+          onConfirm={() => {
+            const target = confirmSwitch;
+            setConfirmSwitch(undefined);
+            setFilesDirty(false);
+            setHostId(target.hostId);
+            if (target.openRequest) {
+              setMode("files");
+              setFileRequest(target.openRequest);
+            }
+          }}
+        />
+      )}
+      {confirmDelete && (
+        <ConfirmDialog
+          title={`删除连接“${confirmDelete.name ?? "这台连接"}”？`}
+          description="该连接的终端与隧道会一并关闭，已保存凭据也会被清理。"
+          confirm="删除连接"
+          danger
+          onClose={() => setConfirmDelete(undefined)}
+          onConfirm={async () => {
+            const target = confirmDelete;
+            setConfirmDelete(undefined);
+            try {
+              await api.post("/hosts/delete", { hostId: target.id });
+              const next = await refresh();
+              if (target.id === hostId) {
+                setFilesDirty(false);
+                setHostId(next.hosts[0]?.id ?? "");
+              }
+              toast("连接已删除");
+            } catch (error) {
+              toast((error as Error).message, true);
+            }
+          }}
+        />
+      )}
       {trust && (
-        <div className="rw-modal-backdrop">
-          <section
-            className="rw-modal rw-trust"
-            role="dialog"
-            aria-modal="true"
-            aria-label="核对服务器指纹"
-          >
-            <h2>核对这台服务器的身份</h2>
-            <p>首次连接 {trust.address}，请与服务器管理者提供的指纹核对。</p>
-            <div className="rw-fingerprint">
-              <small>{trust.algorithm}</small>
-              <code>{trust.fingerprint}</code>
-            </div>
-            <footer>
-              <button className="rw-button" onClick={() => setTrust(undefined)}>
-                取消
-              </button>
-              <button
-                className="rw-button primary"
-                onClick={() => {
-                  const value = trust;
-                  setTrust(undefined);
-                  void (async () => {
-                    try {
-                      await api.post("/trust", value);
-                      await connect(value.hostId);
-                    } catch (error) {
-                      toast((error as Error).message, true);
-                    }
-                  })();
-                }}
-              >
-                信任并连接
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          ariaLabel="核对服务器指纹"
+          className="rw-trust"
+          onClose={() => setTrust(undefined)}
+        >
+          <h2>核对这台服务器的身份</h2>
+          <p>首次连接 {trust.address}，请与服务器管理者提供的指纹核对。</p>
+          <div className="rw-fingerprint">
+            <small>{trust.algorithm}</small>
+            <code>{trust.fingerprint}</code>
+          </div>
+          <footer>
+            <button
+              type="button"
+              className="rw-button"
+              onClick={() => setTrust(undefined)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="rw-button primary"
+              onClick={() => {
+                const value = trust;
+                setTrust(undefined);
+                void (async () => {
+                  try {
+                    await api.post("/trust", value);
+                    await connect(value.hostId);
+                  } catch (error) {
+                    toast((error as Error).message, true);
+                  }
+                })();
+              }}
+            >
+              信任并连接
+            </button>
+          </footer>
+        </Modal>
       )}
       {passwordFor && (
-        <div className="rw-modal-backdrop">
-          <form
-            className="rw-modal rw-action-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label="输入连接密码"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const target = passwordFor;
-              setPasswordFor(undefined);
-              const value = password;
-              setPassword("");
-              void connect(target.id, { password: value });
-            }}
-          >
-            <h2>输入连接密码</h2>
-            <p>{passwordFor.name} · 密码只保存在宿主进程内存中。</p>
-            <input
-              autoFocus
-              required
-              type="password"
-              aria-label="连接密码"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-            <footer>
-              <button
-                type="button"
-                className="rw-button"
-                onClick={() => setPasswordFor(undefined)}
-              >
-                取消
-              </button>
-              <button type="submit" className="rw-button primary">
-                连接
-              </button>
-            </footer>
-          </form>
-        </div>
+        <Modal
+          form
+          ariaLabel="输入连接密码"
+          className="rw-action-dialog"
+          onClose={() => setPasswordFor(undefined)}
+          onSubmit={(e) => {
+            e.preventDefault();
+            const target = passwordFor;
+            setPasswordFor(undefined);
+            const value = password;
+            setPassword("");
+            void connect(target.id, { password: value });
+          }}
+        >
+          <h2>输入连接密码</h2>
+          <p>
+            {passwordFor.name} · 密码将安全保存到 DSH
+            凭据库，重连自动复用，随时可在编辑连接中忘记。
+          </p>
+          <input
+            autoFocus
+            required
+            type="password"
+            aria-label="连接密码"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <footer>
+            <button
+              type="button"
+              className="rw-button"
+              onClick={() => setPasswordFor(undefined)}
+            >
+              取消
+            </button>
+            <button type="submit" className="rw-button primary">
+              连接
+            </button>
+          </footer>
+        </Modal>
       )}
     </div>
   );

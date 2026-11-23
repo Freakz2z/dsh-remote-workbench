@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-workbench",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "极其顺手的 AI 远程工作台 · DSH 原生右侧栏、SSH/SFTP、监控与 PDF 编辑",
   "type": "module",
   "main": "lib/index.js",

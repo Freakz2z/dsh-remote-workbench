@@ -2,10 +2,10 @@
 
 **DSH 原生右侧栏里的 AI 远程工作台：SSH、SFTP、监控与文档编辑，和普通对话并排。**
 
-[![version](https://img.shields.io/badge/version-0.2.1-orange)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.2.2-orange)](CHANGELOG.md)
 [![DSH](https://img.shields.io/badge/DSH-%E2%89%A5%200.2.2--rc.3-blue)](https://github.com/deepseek-ai/deepseek-harness)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-39%20backend%20%C2%B7%2012%20UI%20%C2%B7%2024%20DSH-success)](#开发与验证)
+[![tests](https://img.shields.io/badge/tests-39%20backend%20%C2%B7%2013%20UI%20%C2%B7%2024%20DSH-success)](#开发与验证)
 
 Remote Workbench 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的第三方插件。它在 DSH **自带的右侧边栏**里打开一个远程 Agent：中央继续使用原生对话，右侧查看服务器监控、浏览和编辑远程文件，随时把文件或监控摘要交给当前会话。另有一个独立工作台，保留 SSH 终端、命令栏、隧道等完整操作。
 
@@ -125,7 +125,7 @@ dsh plugin --profile web add dsh-remote-workbench
 从 [Releases](https://github.com/Freakz2z/dsh-remote-workbench/releases) 下载最新的 `dsh-remote-workbench-*.tgz`，然后安装到目标 profile：
 
 ```sh
-dsh plugin --profile desktop add /absolute/path/dsh-remote-workbench-0.2.1.tgz
+dsh plugin --profile desktop add /absolute/path/dsh-remote-workbench-0.2.2.tgz
 ```
 
 ### 从源码安装
@@ -211,7 +211,7 @@ npm run dev                 # 本机独立预览 http://127.0.0.1:4720
 npm run typecheck
 npm test                    # 39 项：真实 OpenSSH / SFTP、HTTP 边界、资源、凭据与授权
 npx playwright install chromium
-npm run test:ui             # 12 项：浏览器交互、响应式、主题与草稿
+npm run test:ui             # 13 项：浏览器交互、响应式、主题与草稿
 npm run test:dsh            # 24 项：隔离 profile 中安装真实 DSH 并验收
 npm run build               # lib/index.js + lib/client.js
 npm pack --pack-destination releases

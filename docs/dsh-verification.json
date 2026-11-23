@@ -1,6 +1,6 @@
 {
-  "testedAt": "2026-11-17T07:25:16.283Z",
-  "dshVersion": "0.2.2-rc.3",
+  "testedAt": "2026-11-23T01:38:53.029Z",
+  "dshVersion": "0.2.2-rc.5",
   "result": "passed",
   "checks": [
     "isolated profile installation",

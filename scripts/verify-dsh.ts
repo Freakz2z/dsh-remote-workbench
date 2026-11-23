@@ -414,6 +414,10 @@ try {
   await agentPane
     .getByRole("button", { name: "sample.json 更多操作", exact: true })
     .click();
+  await page
+    .getByRole("menu")
+    .getByRole("button", { name: "移动 / 重命名", exact: true })
+    .click();
   const moveDialog = agentPane.getByRole("dialog", {
     name: "移动 / 重命名",
     exact: true,

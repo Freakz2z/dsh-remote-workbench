@@ -97,13 +97,16 @@ test("text and PDF drafts survive mode, list and tab switches", async ({
     "DRAFT_MARK",
   );
 
-  // PDF: annotate + rotate, then switch tabs and back.
+  // PDF: browse mode click must not open composer; annotate mode opens it.
   await page.getByRole("button", { name: "返回文件列表" }).click();
   await row(page, "sample.pdf").dblclick();
   await expect(page.locator(".rw-pdf-canvas")).toBeVisible();
   const canvas = page.locator(".rw-pdf-canvas");
   await expect(canvas).toHaveAttribute("width", /\d{3,}/);
   const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 3);
+  await expect(page.getByRole("textbox", { name: "批注内容" })).toHaveCount(0);
+  await page.getByRole("button", { name: "批注模式" }).click();
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 3);
   await page.getByRole("textbox", { name: "批注内容" }).fill("检查这一段");
   await page.keyboard.press("Enter");
@@ -168,13 +171,18 @@ test("PDF form fields are editable and the annotated file is saved atomically", 
   await formField.locator("input").fill(marker);
 
   const canvas = page.locator(".rw-pdf-canvas");
+  await page.getByRole("button", { name: "批注模式" }).click();
   // Click inside the visible top of the page: the forms panel covers the rest.
   await canvas.click({ position: { x: 60, y: 40 } });
   await page.getByRole("textbox", { name: "批注内容" }).fill("已核对");
   await page.keyboard.press("Enter");
 
   await page.getByRole("button", { name: "保存 PDF" }).click();
-  await expect(page.getByRole("status")).toContainText("PDF 批注已保存");
+  const toast = page.getByRole("status");
+  await expect(toast).toContainText("PDF 批注已保存");
+  // Toast is anchored near the top so it never obscures the PDF forms panel.
+  const toastBox = await toast.boundingBox();
+  expect(toastBox!.y).toBeLessThan(120);
   await expect(page.locator(".rw-agent-tab.dirty")).toHaveCount(0);
   await expect(page.locator(".rw-pdf-annotation")).toHaveCount(0);
 
@@ -281,9 +289,13 @@ test("agent pane edits remote files with the captured connection revision", asyn
   await copy.getByRole("button", { name: "复制", exact: true }).click();
   await expect(row(page, `copied-${name}`)).toBeVisible();
 
-  // Rename through the row menu keeps the same captured revision.
+  // Rename through the row context menu keeps the same captured revision.
   await row(page, `copied-${name}`).hover();
   await page.getByRole("button", { name: `copied-${name} 更多操作` }).click();
+  await page
+    .getByRole("menu")
+    .getByRole("button", { name: "移动 / 重命名" })
+    .click();
   const move = page.getByRole("dialog", { name: "移动 / 重命名" });
   await move.getByLabel("名称").fill(`moved-${name}`);
   await move.getByRole("button", { name: "移动" }).click();
@@ -327,13 +339,14 @@ test("empty agent pane can create connections without leaving the sidebar", asyn
   const switcher = page.getByRole("dialog", { name: "选择服务器" });
   await expect(switcher).toBeVisible();
   await expect(
-    switcher.getByRole("button", { name: "+ 新建连接" }),
+    switcher.getByRole("button", { name: "新建连接", exact: true }),
   ).toBeVisible();
-  await switcher.getByRole("button", { name: "+ 新建连接" }).click();
+  await switcher.getByRole("button", { name: "新建连接", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "新建连接" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("连接名称")).toBeVisible();
   await expect(dialog.getByLabel("主机地址")).toBeVisible();
+  await expect(dialog.locator(".rw-auth-hint")).toHaveCount(0);
   await dialog.getByRole("button", { name: "取消" }).click();
   await expect(dialog).toHaveCount(0);
 
@@ -344,4 +357,12 @@ test("empty agent pane can create connections without leaving the sidebar", asyn
     .getByRole("button", { name: "编辑当前连接" })
     .click();
   await expect(page.getByRole("dialog", { name: "编辑连接" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "编辑连接" })).toHaveCount(0);
+
+  // Narrow right-sidebar width stays free of horizontal overflow.
+  await page.setViewportSize({ width: 320, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(320);
 });

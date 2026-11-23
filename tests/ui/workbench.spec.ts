@@ -372,3 +372,38 @@ test("command library fills the bar and keeps secrets out of history", async ({
   ).toHaveCount(0);
   await closeTerminals(page);
 });
+
+test("multi-select file actions and new host dialog defaults work cleanly", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByText("sample.md", { exact: true })).toBeVisible();
+
+  await page.getByRole("option", { name: /sample\.md/ }).click();
+  await page
+    .getByRole("option", { name: /sample\.json/ })
+    .click({ modifiers: ["Shift"] });
+  const selectionBar = page.locator(".rw-selection-actions");
+  await expect(selectionBar).toBeVisible();
+  await expect(
+    selectionBar.getByRole("button", { name: "复制路径" }),
+  ).toBeVisible();
+  await expect(
+    selectionBar.getByRole("button", { name: /批量删除/ }),
+  ).toBeVisible();
+
+  // New connection defaults to key auth without legacy SSH Agent warning.
+  await page.locator(".rw-host-switch").click();
+  await page
+    .getByRole("dialog", { name: "切换服务器" })
+    .getByRole("button", { name: "新建连接", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "新建连接" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".rw-auth-hint")).toHaveCount(0);
+  await expect(
+    dialog.getByRole("button", { name: "私钥文件" }),
+  ).toHaveClass(/active/);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});

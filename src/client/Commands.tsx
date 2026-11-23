@@ -11,15 +11,23 @@ import {
   PauseCircle,
   PlayCircle,
   Plus,
-  Check,
+  Pencil,
 } from "lucide-react";
 import { api, ApiError, remoteJoin } from "./api.ts";
+import { ConfirmDialog } from "./components/Modal.tsx";
 import type {
   CommandHistoryEntry,
   CommandLibrary,
   CommandSnippet,
   CommandSuggestion,
 } from "../shared/workstation.ts";
+
+const suggestionKindLabel: Record<CommandSuggestion["kind"], string> = {
+  history: "历史",
+  snippet: "片段",
+  path: "路径",
+  command: "命令",
+};
 
 const suggestionIcon = (kind: CommandSuggestion["kind"]) => {
   if (kind === "history") return <History size={13} />;
@@ -65,6 +73,7 @@ export function CommandBar({
   const [open, setOpen] = useState(false);
   const [picker, setPicker] = useState<"history" | "snippets">();
   const [library, setLibrary] = useState<CommandLibrary>();
+  const pickerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const requestId = useRef(0);
   const ready = state === "ready" && writable;
@@ -79,7 +88,8 @@ export function CommandBar({
         .then((value) => {
           if (requestId.current !== id) return;
           setItems(value.items.slice(0, 8));
-          setActive(value.items.length ? 0 : -1);
+          // Never auto-select item 0 so pressing Enter sends the typed command.
+          setActive(-1);
         })
         .catch(() => {
           if (requestId.current === id) setItems([]);
@@ -87,6 +97,23 @@ export function CommandBar({
     }, 200);
     return () => clearTimeout(timer);
   }, [input, open, hostId, cwd]);
+
+  useEffect(() => {
+    if (!picker) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node))
+        setPicker(undefined);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPicker(undefined);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [picker]);
 
   const loadLibrary = useCallback(async () => {
     try {
@@ -151,16 +178,21 @@ export function CommandBar({
             if (e.key === "ArrowDown") {
               e.preventDefault();
               setOpen(true);
-              setActive((i) => (items.length ? (i + 1) % items.length : -1));
+              setActive((i) =>
+                items.length ? (i < 0 ? 0 : (i + 1) % items.length) : -1,
+              );
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
+              setOpen(true);
               setActive((i) =>
-                items.length ? (i - 1 + items.length) % items.length : -1,
+                items.length
+                  ? (i <= 0 ? items.length - 1 : i - 1)
+                  : -1,
               );
             } else if (e.key === "Tab") {
-              if (open && active >= 0 && items[active]) {
+              if (open && items.length) {
                 e.preventDefault();
-                fill(items[active].value);
+                fill(items[active >= 0 ? active : 0]!.value);
               }
             } else if (e.key === "Enter") {
               e.preventDefault();
@@ -235,6 +267,9 @@ export function CommandBar({
                   {suggestionIcon(item.kind)}
                 </span>
                 <span className="rw-cmdbar-suggest-label">{item.label}</span>
+                <span className="rw-cmdbar-suggest-kind">
+                  {suggestionKindLabel[item.kind]}
+                </span>
                 <span className="rw-cmdbar-suggest-desc">
                   {item.description}
                 </span>
@@ -245,6 +280,7 @@ export function CommandBar({
       )}
       {picker && (
         <div
+          ref={pickerRef}
           className="rw-cmdbar-picker"
           role="dialog"
           aria-label={picker === "history" ? "命令历史" : "命令片段"}
@@ -328,6 +364,7 @@ export function CommandLibraryPanel({
     group: string;
     global: boolean;
   }>();
+  const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(
@@ -406,11 +443,7 @@ export function CommandLibraryPanel({
           aria-label="清空历史"
           title="清空此主机历史"
           disabled={!history.length || busy}
-          onClick={() => {
-            if (!window.confirm("清空这台服务器的命令历史？片段不受影响。"))
-              return;
-            void act(() => api.post("/commands/clear", { hostId }));
-          }}
+          onClick={() => setConfirmClear(true)}
         >
           <Trash2 size={14} />
         </button>
@@ -509,7 +542,7 @@ export function CommandLibraryPanel({
                       })
                     }
                   >
-                    <Check size={12} />
+                    <Pencil size={12} />
                   </button>
                   <button
                     className="rw-icon"
@@ -594,6 +627,20 @@ export function CommandLibraryPanel({
             </button>
           </footer>
         </form>
+      )}
+      {confirmClear && (
+        <ConfirmDialog
+          title="清空命令历史？"
+          description="清空这台服务器的命令历史？命令片段不受影响。"
+          confirm="清空历史"
+          danger
+          busy={busy}
+          onClose={() => setConfirmClear(false)}
+          onConfirm={async () => {
+            await act(() => api.post("/commands/clear", { hostId }));
+            setConfirmClear(false);
+          }}
+        />
       )}
     </aside>
   );

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  ChevronRight,
   Cpu,
   HardDrive,
   LoaderCircle,
@@ -9,6 +10,7 @@ import {
   Network,
   Pause,
   Play,
+  PlugZap,
   RefreshCw,
   ServerCog,
   ShieldAlert,
@@ -39,46 +41,146 @@ const INTERVALS = [
   { value: 30000, label: "30 秒" },
 ];
 
-/** Area sparkline; null samples leave a gap instead of drawing a fake 0. */
+/** Interactive area sparkline; null samples leave a gap instead of drawing a fake 0. */
 function Sparkline({
   points,
   pick,
   max,
   label,
+  format,
 }: {
   points: ResourceHistoryPoint[];
   pick(point: ResourceHistoryPoint): number | null;
   max?: number;
   label: string;
+  format?: (value: number) => string;
 }) {
+  const gradId = useId();
+  const [hoverIdx, setHoverIdx] = useState<number>();
   const values = points.map(pick);
   const known = values.filter((v): v is number => typeof v === "number");
   const top = max ?? Math.max(1, ...known);
   const width = 100;
   const height = 30;
   let path = "";
+  let area = "";
+  let segmentStart = -1;
+  let lastX = 0;
   let started = false;
+  const coords: ({ x: number; y: number; value: number } | null)[] = [];
+
   values.forEach((value, index) => {
     if (value === null) {
+      if (started && segmentStart >= 0) {
+        area += `L${lastX.toFixed(2)},${height}L${segmentStart.toFixed(2)},${height}Z`;
+      }
       started = false;
+      segmentStart = -1;
+      coords.push(null);
       return;
     }
     const x =
       values.length === 1 ? width : (index / (values.length - 1)) * width;
     const y = height - Math.min(1, value / top) * height;
     path += `${started ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
+    area += `${started ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
+    if (!started) segmentStart = x;
+    lastX = x;
     started = true;
+    coords.push({ x, y, value });
   });
+  if (started && segmentStart >= 0) {
+    area += `L${lastX.toFixed(2)},${height}L${segmentStart.toFixed(2)},${height}Z`;
+  }
+
+  if (known.length < 2) {
+    return (
+      <div className="rw-monitor-spark-wrap">
+        <div className="rw-monitor-spark-wait">等待基线采样…</div>
+      </div>
+    );
+  }
+
+  const activeCoord =
+    hoverIdx !== undefined ? coords[hoverIdx] ?? null : null;
+  const activePoint = hoverIdx !== undefined ? points[hoverIdx] : undefined;
+
   return (
-    <svg
-      className="rw-monitor-spark"
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-      role="img"
-      aria-label={label}
-    >
-      <path d={path} fill="none" stroke="currentColor" strokeWidth={1.4} />
-    </svg>
+    <div className="rw-monitor-spark-wrap">
+      <svg
+        className="rw-monitor-spark"
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={label}
+        onMouseMove={(e) => {
+          if (!values.length) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const ratio = Math.max(
+            0,
+            Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)),
+          );
+          setHoverIdx(Math.round(ratio * (values.length - 1)));
+        }}
+        onMouseLeave={() => setHoverIdx(undefined)}
+      >
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="currentColor" stopOpacity="0.24" />
+            <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        <line
+          x1="0"
+          y1={height / 2}
+          x2={width}
+          y2={height / 2}
+          stroke="currentColor"
+          strokeOpacity="0.14"
+          strokeDasharray="2 2"
+          strokeWidth="0.6"
+          vectorEffect="non-scaling-stroke"
+        />
+        {area && <path d={area} fill={`url(#${gradId})`} />}
+        <path
+          d={path}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.4}
+          vectorEffect="non-scaling-stroke"
+        />
+        {activeCoord && (
+          <>
+            <line
+              x1={activeCoord.x}
+              y1="0"
+              x2={activeCoord.x}
+              y2={height}
+              stroke="currentColor"
+              strokeOpacity="0.4"
+              strokeWidth="0.8"
+              vectorEffect="non-scaling-stroke"
+            />
+            <circle
+              cx={activeCoord.x}
+              cy={activeCoord.y}
+              r="2.2"
+              fill="currentColor"
+            />
+          </>
+        )}
+      </svg>
+      {activeCoord && activePoint && (
+        <span className="rw-monitor-spark-tip">
+          {new Date(activePoint.sampledAt).toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          })}{" "}
+          · {format ? format(activeCoord.value) : activeCoord.value.toFixed(1)}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -126,6 +228,8 @@ export function MonitorView({
   hostId,
   hostName,
   connected,
+  connecting = false,
+  onConnect,
   active = true,
   onSummary,
   onNotice,
@@ -133,6 +237,8 @@ export function MonitorView({
   hostId: string;
   hostName: string;
   connected: boolean;
+  connecting?: boolean;
+  onConnect?(): void;
   /** False while the pane is hidden (other agent mode, collapsed tab). */
   active?: boolean;
   onSummary(text: string): void;
@@ -250,12 +356,6 @@ export function MonitorView({
         ))}
       </div>
       <div className="rw-monitor-controls">
-        <span className="rw-monitor-updated">
-          <Timer size={12} />
-          {updatedAt
-            ? `更新于 ${new Date(updatedAt).toLocaleTimeString("zh-CN")}`
-            : "等待采样"}
-        </span>
         <label>
           采样
           <select
@@ -307,6 +407,21 @@ export function MonitorView({
           <ServerCog size={26} />
           <h2>连接后开始监控</h2>
           <p>监控只在已连接的服务器上采样真实指标。</p>
+          {onConnect && (
+            <button
+              type="button"
+              className="rw-button primary"
+              disabled={connecting}
+              onClick={onConnect}
+            >
+              {connecting ? (
+                <LoaderCircle size={13} className="rw-spin" />
+              ) : (
+                <PlugZap size={13} />
+              )}
+              {connecting ? "正在连接…" : `连接 ${hostName}`}
+            </button>
+          )}
         </div>
       </div>
     );
@@ -351,6 +466,16 @@ export function MonitorView({
               ))}
             </ul>
           )}
+          <div className="rw-monitor-status">
+            <Timer size={11} />
+            <span>
+              {paused
+                ? "采样已暂停"
+                : updatedAt
+                  ? `更新于 ${new Date(updatedAt).toLocaleTimeString("zh-CN")}`
+                  : "等待采样"}
+            </span>
+          </div>
         </div>
       )}
     </div>
@@ -409,13 +534,18 @@ function Overview({
         <header>
           <Activity size={14} />
           <h3>实时负载</h3>
-          <button className="rw-monitor-link" onClick={() => onTab("cpu")}>
-            查看 CPU
-          </button>
+          <span className="rw-monitor-muted">点击指标查看详情</span>
         </header>
         <div className="rw-monitor-grid">
-          <div>
-            <span>CPU</span>
+          <button
+            type="button"
+            className="rw-monitor-tile"
+            onClick={() => onTab("cpu")}
+          >
+            <span className="rw-monitor-tile-head">
+              <span>CPU</span>
+              <ChevronRight size={12} />
+            </span>
             <strong>{percent(sample.cpu.usagePercent, 1)}</strong>
             <Meter
               value={sample.cpu.usagePercent}
@@ -427,10 +557,18 @@ function Overview({
               pick={(p) => p.cpuPercent}
               max={100}
               label="CPU 历史"
+              format={(v) => percent(v, 1)}
             />
-          </div>
-          <div>
-            <span>内存</span>
+          </button>
+          <button
+            type="button"
+            className="rw-monitor-tile"
+            onClick={() => onTab("memory")}
+          >
+            <span className="rw-monitor-tile-head">
+              <span>内存</span>
+              <ChevronRight size={12} />
+            </span>
             <strong>{percent(sample.memory?.usagePercent ?? null, 1)}</strong>
             <Meter
               value={sample.memory?.usagePercent ?? null}
@@ -442,10 +580,18 @@ function Overview({
               pick={(p) => p.memoryPercent}
               max={100}
               label="内存历史"
+              format={(v) => percent(v, 1)}
             />
-          </div>
-          <div>
-            <span>根分区</span>
+          </button>
+          <button
+            type="button"
+            className="rw-monitor-tile"
+            onClick={() => onTab("disk")}
+          >
+            <span className="rw-monitor-tile-head">
+              <span>根分区</span>
+              <ChevronRight size={12} />
+            </span>
             <strong>{percent(rootFs?.usagePercent ?? null, 1)}</strong>
             <Meter
               value={rootFs?.usagePercent ?? null}
@@ -457,17 +603,25 @@ function Overview({
                 ? `${rootFs.mount} · ${bytes(rootFs.usedBytes)} / ${bytes(rootFs.totalBytes)}`
                 : "没有挂载点数据"}
             </small>
-          </div>
-          <div>
-            <span>网络吞吐</span>
+          </button>
+          <button
+            type="button"
+            className="rw-monitor-tile"
+            onClick={() => onTab("network")}
+          >
+            <span className="rw-monitor-tile-head">
+              <span>网络吞吐</span>
+              <ChevronRight size={12} />
+            </span>
             <strong>↓ {rxKnown ? bytes(rx) + "/s" : "采样中"}</strong>
             <small>↑ {txKnown ? bytes(tx) + "/s" : "采样中"}</small>
             <Sparkline
               points={history}
               pick={(p) => p.receiveBytesPerSecond}
               label="接收速率历史"
+              format={(v) => bytes(v) + "/s"}
             />
-          </div>
+          </button>
         </div>
       </section>
 
@@ -764,11 +918,13 @@ function DiskView({ sample }: { sample: ResourceSample }) {
             <tbody>
               {sample.filesystems.map((fs) => (
                 <tr key={fs.mount + fs.device}>
-                  <td>
+                  <td data-label="挂载点">
                     <code>{fs.mount}</code>
                   </td>
-                  <td className="rw-monitor-muted">{fs.device}</td>
-                  <td>
+                  <td data-label="设备" className="rw-monitor-muted">
+                    {fs.device}
+                  </td>
+                  <td data-label="使用">
                     <div className="rw-monitor-cell-meter">
                       <Meter
                         value={fs.usagePercent}
@@ -778,10 +934,10 @@ function DiskView({ sample }: { sample: ResourceSample }) {
                       <small>{percent(fs.usagePercent, 1)}</small>
                     </div>
                   </td>
-                  <td>
+                  <td data-label="已用 / 总量">
                     {bytes(fs.usedBytes)} / {bytes(fs.totalBytes)}
                   </td>
-                  <td>{bytes(fs.availableBytes)}</td>
+                  <td data-label="可用">{bytes(fs.availableBytes)}</td>
                 </tr>
               ))}
             </tbody>
@@ -808,24 +964,24 @@ function DiskView({ sample }: { sample: ResourceSample }) {
             <tbody>
               {sample.disks.map((disk) => (
                 <tr key={disk.device}>
-                  <td>
+                  <td data-label="设备">
                     <code>{disk.device}</code>
                   </td>
-                  <td>
+                  <td data-label="读">
                     {rate(disk.readBytesPerSecond)}
                     <small className="rw-monitor-muted">
                       {" "}
                       累计 {bytes(disk.readBytes)}
                     </small>
                   </td>
-                  <td>
+                  <td data-label="写">
                     {rate(disk.writeBytesPerSecond)}
                     <small className="rw-monitor-muted">
                       {" "}
                       累计 {bytes(disk.writeBytes)}
                     </small>
                   </td>
-                  <td>{percent(disk.busyPercent, 1)}</td>
+                  <td data-label="忙碌">{percent(disk.busyPercent, 1)}</td>
                 </tr>
               ))}
             </tbody>
@@ -867,27 +1023,27 @@ function NetworkView({
             <tbody>
               {sample.networks.map((net) => (
                 <tr key={net.name}>
-                  <td>
+                  <td data-label="网卡">
                     <code>{net.name}</code>
                   </td>
-                  <td className="rw-monitor-muted">
+                  <td data-label="地址" className="rw-monitor-muted">
                     {net.addresses.join(", ") || "—"}
                   </td>
-                  <td>
+                  <td data-label="接收">
                     {rate(net.receiveBytesPerSecond)}
                     <small className="rw-monitor-muted">
                       {" "}
                       累计 {bytes(net.receivedBytes)}
                     </small>
                   </td>
-                  <td>
+                  <td data-label="发送">
                     {rate(net.sendBytesPerSecond)}
                     <small className="rw-monitor-muted">
                       {" "}
                       累计 {bytes(net.sentBytes)}
                     </small>
                   </td>
-                  <td>
+                  <td data-label="错误">
                     ↓{net.receiveErrors} / ↑{net.sendErrors}
                   </td>
                 </tr>

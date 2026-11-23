@@ -17,12 +17,64 @@ export interface TerminalHandle {
   focus(): void;
   /** Whether this display currently holds the input right. */
   writable(): boolean;
+  clear(): void;
+  getSelection(): string;
+  find(
+    query: string,
+    direction?: "next" | "prev",
+  ): { found: boolean; current: number; total: number };
 }
 export interface TerminalStatus {
   id: string;
   state: "connecting" | "ready" | "closed";
   writable: boolean;
 }
+
+function isDarkColor(color: string): boolean {
+  const m = color.match(/\d+/g);
+  if (!m || m.length < 3)
+    return document.body.hasAttribute("data-ds-dark-theme");
+  const [r, g, b] = m.map(Number);
+  return 0.299 * r + 0.587 * g + 0.114 * b < 128;
+}
+
+const LIGHT_ANSI = {
+  black: "#1f2328",
+  red: "#cf222e",
+  green: "#116329",
+  yellow: "#9a6700",
+  blue: "#0969da",
+  magenta: "#8250df",
+  cyan: "#1b7c83",
+  white: "#6e7781",
+  brightBlack: "#57606a",
+  brightRed: "#a40e26",
+  brightGreen: "#1a7f37",
+  brightYellow: "#7d4e00",
+  brightBlue: "#218bff",
+  brightMagenta: "#a475f9",
+  brightCyan: "#3192aa",
+  brightWhite: "#8c959f",
+};
+
+const DARK_ANSI = {
+  black: "#2c2e33",
+  red: "#f87171",
+  green: "#4ade80",
+  yellow: "#facc15",
+  blue: "#60a5fa",
+  magenta: "#c084fc",
+  cyan: "#22d3ee",
+  white: "#e5e7eb",
+  brightBlack: "#6b7280",
+  brightRed: "#fca5a5",
+  brightGreen: "#86efac",
+  brightYellow: "#fde047",
+  brightBlue: "#93c5fd",
+  brightMagenta: "#d8b4fe",
+  brightCyan: "#67e8f9",
+  brightWhite: "#f9fafb",
+};
 
 /**
  * Read the live DSH theme from the surrounding workbench. Every value comes
@@ -37,6 +89,8 @@ function readTerminalPalette(node: HTMLElement | null) {
     style.getPropertyValue(name).trim() || fallback;
   const background = read("--rw-term-bg", "#ffffff");
   const foreground = read("--rw-term-fg", "#0f1115");
+  const dark =
+    document.body.hasAttribute("data-ds-dark-theme") || isDarkColor(background);
   const chosen = read("--dsh-font-family-terminal", "");
   const codeFamily = read(
     "--ds-font-family-code",
@@ -50,9 +104,13 @@ function readTerminalPalette(node: HTMLElement | null) {
       foreground,
       cursor: foreground,
       cursorAccent: background,
-      selectionBackground: foreground,
-      selectionForeground: background,
-      selectionInactiveBackground: foreground,
+      selectionBackground: dark
+        ? "rgba(96, 165, 250, 0.28)"
+        : "rgba(65, 118, 230, 0.2)",
+      selectionInactiveBackground: dark
+        ? "rgba(96, 165, 250, 0.16)"
+        : "rgba(65, 118, 230, 0.12)",
+      ...(dark ? DARK_ANSI : LIGHT_ANSI),
     },
     fontFamily: chosen ? `${chosen}, ${codeFamily}` : codeFamily,
     fontSize,
@@ -66,8 +124,12 @@ export const TerminalView = forwardRef<
     visible: boolean;
     onSelection(text: string): void;
     onStatus?(status: TerminalStatus): void;
+    onRestart?(): void;
   }
->(function TerminalView({ id, visible, onSelection, onStatus }, ref) {
+>(function TerminalView(
+  { id, visible, onSelection, onStatus, onRestart },
+  ref,
+) {
   const element = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<"connecting" | "ready" | "closed">(
     "connecting",
@@ -85,6 +147,10 @@ export const TerminalView = forwardRef<
   statusRef.current = onStatus;
   const writableRef = useRef(true);
   const stateRef = useRef<"connecting" | "ready" | "closed">("connecting");
+  const searchRef = useRef<{ query: string; index: number }>({
+    query: "",
+    index: -1,
+  });
   writableRef.current = writable;
   stateRef.current = state;
 
@@ -111,6 +177,51 @@ export const TerminalView = forwardRef<
         termRef.current?.focus();
       },
       writable: () => writableRef.current,
+      clear() {
+        termRef.current?.clear();
+        searchRef.current = { query: "", index: -1 };
+      },
+      getSelection() {
+        return termRef.current?.getSelection() ?? "";
+      },
+      find(query: string, direction: "next" | "prev" = "next") {
+        const terminal = termRef.current;
+        if (!terminal || !query) {
+          searchRef.current = { query: "", index: -1 };
+          return { found: false, current: 0, total: 0 };
+        }
+        const buf = terminal.buffer.active;
+        const needle = query.toLowerCase();
+        const hits: { row: number; col: number }[] = [];
+        for (let row = 0; row < buf.length; row++) {
+          const text = buf.getLine(row)?.translateToString(true) ?? "";
+          if (!text) continue;
+          const lower = text.toLowerCase();
+          let col = lower.indexOf(needle);
+          while (col !== -1) {
+            hits.push({ row, col });
+            col = lower.indexOf(needle, col + Math.max(1, needle.length));
+          }
+        }
+        if (!hits.length) {
+          searchRef.current = { query, index: -1 };
+          return { found: false, current: 0, total: 0 };
+        }
+        let nextIdx: number;
+        if (searchRef.current.query !== query || searchRef.current.index < 0) {
+          nextIdx = direction === "prev" ? hits.length - 1 : 0;
+        } else {
+          nextIdx =
+            direction === "prev"
+              ? (searchRef.current.index - 1 + hits.length) % hits.length
+              : (searchRef.current.index + 1) % hits.length;
+        }
+        searchRef.current = { query, index: nextIdx };
+        const hit = hits[nextIdx]!;
+        terminal.select(hit.col, hit.row, query.length);
+        terminal.scrollToLine(Math.max(0, hit.row - 3));
+        return { found: true, current: nextIdx + 1, total: hits.length };
+      },
     }),
     [],
   );
@@ -285,13 +396,21 @@ export const TerminalView = forwardRef<
               <Hand size={12} />
               接管输入
             </button>
-          ) : (
-            !exited && (
-              <button onClick={() => setGeneration((n) => n + 1)}>
+          ) : exited ? (
+            onRestart && (
+              <button type="button" onClick={onRestart}>
                 <RotateCw size={12} />
-                重新连接显示
+                新建终端
               </button>
             )
+          ) : (
+            <button
+              type="button"
+              onClick={() => setGeneration((n) => n + 1)}
+            >
+              <RotateCw size={12} />
+              重新连接显示
+            </button>
           )}
         </div>
       )}
